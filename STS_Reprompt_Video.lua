@@ -19,13 +19,13 @@ local projectSlug, projectName = STS_getResolveProjectSlug()
 local outputDir = STS_getOutputDir(projectSlug)
 
 -- ============================================================
--- DETECT CURRENT CLIP (try timeline playhead first, then media pool selection)
+-- DETECT CURRENT CLIP (media pool selection first — that's what the user clicked)
 -- ============================================================
 
-local clipInfo = STS_getCurrentTimelineItem()
+local clipInfo = STS_getSelectedMediaPoolClip()
 if not clipInfo or clipInfo.status ~= "ok" or (clipInfo.comments or "") == "" then
-    -- Fallback: try selected clip in media pool
-    clipInfo = STS_getSelectedMediaPoolClip()
+    -- Fallback: try timeline playhead
+    clipInfo = STS_getCurrentTimelineItem()
 end
 
 local prefillPrompt = ""
@@ -208,10 +208,10 @@ function win.On.STS_RepromptVid.Close(ev) disp:ExitLoop() end
 function win.On.Cancel.Clicked(ev) disp:ExitLoop() end
 
 function win.On.RefreshClip.Clicked(ev)
-    -- Try timeline first, then media pool
-    clipInfo = STS_getCurrentTimelineItem()
+    -- Try media pool selection first (what the user clicked), then timeline
+    clipInfo = STS_getSelectedMediaPoolClip()
     if not clipInfo or clipInfo.status ~= "ok" or (clipInfo.comments or "") == "" then
-        clipInfo = STS_getSelectedMediaPoolClip()
+        clipInfo = STS_getCurrentTimelineItem()
     end
     if clipInfo and clipInfo.status == "ok" then
         itm.ClipName.Text = clipInfo.name or "(none)"
