@@ -359,7 +359,7 @@ class VoiceboxClient:
         resp = self.session.post(
             f"{self.server_url}/generate/stream",
             json=payload,
-            timeout=900,  # Very long timeout — CPU-mode TTS can take 3+ min per line
+            timeout=None,  # No timeout — CPU-mode TTS can take 60-120+ seconds per phrase
             stream=True,
         )
         resp.raise_for_status()

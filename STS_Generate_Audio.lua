@@ -228,7 +228,7 @@ function win.On.Generate.Clicked(ev)
 
     local voiceId = savedVoices[selectedVoiceName].voice_id
 
-    itm.StatusLabel.Text = "Generating audio..."
+    itm.StatusLabel.Text = "Generating audio... (Voicebox CPU mode: expect 60-90 seconds per phrase)"
     itm.StatusLabel.StyleSheet = "color: #888;"
 
     local providerId = STS_getProviderIdFromCombo(itm.ProviderCombo, STS_voiceProviders)

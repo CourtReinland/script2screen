@@ -125,11 +125,10 @@ class VoiceboxVoiceProvider(VoiceProvider):
         if not save_path.lower().endswith(".wav"):
             save_path_wav = str(Path(save_path).with_suffix(".wav"))
 
-        # Use the STREAMING endpoint — synchronous, returns WAV data
-        # directly.  The async generate+poll path has a race condition
-        # where Voicebox marks status=completed but never populates
-        # audio_path, causing the poll to loop forever.
-        logger.info(f"Voicebox generating speech (streaming): {text[:60]}...")
+        # Use STREAMING endpoint with NO timeout — CPU-mode TTS can take
+        # 60-120+ seconds per phrase. The streaming endpoint is more
+        # reliable than the async endpoint for Voicebox.
+        logger.info(f"Voicebox generating speech (streaming, no timeout): {text[:60]}...")
         self._client.generate_speech_stream(
             profile_id=voice_id,
             text=text,

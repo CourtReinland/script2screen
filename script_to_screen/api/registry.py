@@ -222,6 +222,24 @@ def _register_builtins():
     except ImportError:
         logger.debug("Grok providers not available (missing grok_provider module)")
 
+    # MLX-Audio (fast local TTS on Apple Silicon)
+    try:
+        from .mlx_audio_provider import MLXAudioVoiceProvider
+
+        register_voice_provider(
+            ProviderInfo(
+                id="mlx_audio",
+                name="MLX-Audio Kokoro (Local, Fast)",
+                category="voice",
+                requires_api_key=False,
+                requires_server_url=False,
+                description="Fast local TTS via MLX on Apple Silicon (~12x faster than Voicebox CPU)",
+            ),
+            lambda **kw: MLXAudioVoiceProvider(**kw),
+        )
+    except ImportError:
+        logger.debug("MLX-Audio provider not available (missing mlx_audio_provider module)")
+
     # Kling AI direct API (lip sync with JWT auth)
     try:
         from .kling_provider import KlingLipsyncProvider

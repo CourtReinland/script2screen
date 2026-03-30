@@ -810,8 +810,9 @@ local videoProviders = {
     {id = "comfyui_ltx",  name = "LTX 2.3 (Local ComfyUI)"},
 }
 local voiceProviders = {
+    {id = "mlx_audio",    name = "MLX-Audio Kokoro (Local, Fast)"},
     {id = "elevenlabs",   name = "ElevenLabs (Cloud)"},
-    {id = "voicebox",     name = "Voicebox (Local)"},
+    {id = "voicebox",     name = "Voicebox (Local, Slow)"},
 }
 local lipsyncProviders = {
     {id = "kling",        name = "Kling AI (Direct API)"},

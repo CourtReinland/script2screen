@@ -264,7 +264,8 @@ STS_videoProviders = {
 }
 
 STS_voiceProviders = {
-    {id = "voicebox",     name = "Voicebox (Local)"},
+    {id = "mlx_audio",    name = "MLX-Audio Kokoro (Local, Fast)"},
+    {id = "voicebox",     name = "Voicebox (Local, Slow)"},
     {id = "elevenlabs",   name = "ElevenLabs (Cloud)"},
 }
 
