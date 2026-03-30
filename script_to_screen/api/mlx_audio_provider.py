@@ -87,31 +87,72 @@ class MLXAudioVoiceProvider(VoiceProvider):
             return False, f"Error: {e}"
 
     def clone_voice(self, name: str, audio_paths: list[str], **kwargs) -> str:
-        """Clone a voice by storing the reference audio path.
+        """Clone a voice by analyzing the reference audio and storing it.
 
-        The Qwen3-TTS CustomVoice model performs voice cloning at generation
-        time using the reference audio, so 'cloning' here just validates
-        and stores the reference path. The actual cloning happens in
-        generate_speech() when ref_audio is passed.
+        Detects the speaker's gender from pitch analysis to select the
+        correct base speaker for the Qwen3-TTS CustomVoice model.
+        If the reference audio is longer than 30s, trims to first 20s
+        to avoid transcription artifacts.
 
-        Returns a voice_id in the format 'clone:<ref_audio_path>' which
-        generate_speech() will parse to extract the reference audio.
+        Returns a voice_id in the format 'clone:<base_speaker>:<ref_audio_path>'
         """
         if not audio_paths:
             raise ValueError("No audio samples provided for voice cloning")
 
-        ref_path = audio_paths[0]  # Use the first sample
+        ref_path = audio_paths[0]
         if not os.path.isfile(ref_path):
             raise FileNotFoundError(f"Voice sample not found: {ref_path}")
 
-        # Check file size (recommend 5-30 seconds of clean audio)
-        size = os.path.getsize(ref_path)
-        if size < 10000:
-            logger.warning(f"Voice sample is very small ({size} bytes). "
-                           f"Recommend 5-30 seconds of clean speech.")
+        # Detect gender from pitch using a subprocess (needs librosa in mlx-venv)
+        base_speaker = "serena"  # default to female
+        try:
+            result = subprocess.run(
+                [self._python, "-c",
+                 f"import librosa, numpy as np; "
+                 f"y, sr = librosa.load('{ref_path}', sr=None, duration=15); "
+                 f"f0 = librosa.yin(y, fmin=50, fmax=500, sr=sr); "
+                 f"f0v = f0[f0 > 0]; "
+                 f"mf0 = np.mean(f0v) if len(f0v) > 0 else 200; "
+                 f"print('MALE' if mf0 < 165 else 'FEMALE')"],
+                capture_output=True, text=True, timeout=30,
+            )
+            gender = result.stdout.strip()
+            if gender == "MALE":
+                base_speaker = "aiden"
+            else:
+                base_speaker = "serena"
+            logger.info(f"MLX-Audio: detected {gender} voice -> base speaker '{base_speaker}'")
+        except Exception as e:
+            logger.warning(f"Gender detection failed ({e}), defaulting to '{base_speaker}'")
 
-        voice_id = f"clone:{ref_path}"
-        logger.info(f"MLX-Audio: voice clone registered for '{name}' -> {os.path.basename(ref_path)}")
+        # If audio is too long, trim it (avoids transcription hallucinations)
+        trimmed_path = ref_path
+        try:
+            result = subprocess.run(
+                [self._python, "-c",
+                 f"import librosa; "
+                 f"y, sr = librosa.load('{ref_path}', sr=None); "
+                 f"print(len(y)/sr)"],
+                capture_output=True, text=True, timeout=15,
+            )
+            duration = float(result.stdout.strip())
+            if duration > 30:
+                # Trim to first 20 seconds
+                import tempfile
+                trimmed_path = tempfile.mktemp(suffix=".wav")
+                subprocess.run(
+                    [self._python, "-c",
+                     f"import librosa, soundfile as sf; "
+                     f"y, sr = librosa.load('{ref_path}', sr=None, duration=20); "
+                     f"sf.write('{trimmed_path}', y, sr)"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                logger.info(f"MLX-Audio: trimmed {duration:.0f}s ref audio to 20s")
+        except Exception as e:
+            logger.warning(f"Duration check failed ({e}), using original")
+
+        voice_id = f"clone:{base_speaker}:{trimmed_path}"
+        logger.info(f"MLX-Audio: voice clone for '{name}' -> {base_speaker}, {os.path.basename(ref_path)}")
         return voice_id
 
     def generate_speech(
@@ -136,14 +177,18 @@ class MLXAudioVoiceProvider(VoiceProvider):
 
         # Determine model and voice based on voice_id
         if voice_id.startswith("clone:"):
-            # Voice cloning mode — use CustomVoice model + reference audio
-            ref_audio = voice_id[6:]  # Strip 'clone:' prefix
+            # Voice cloning mode — format: clone:<base_speaker>:<ref_audio_path>
+            parts = voice_id.split(":", 2)
+            if len(parts) == 3:
+                _, voice, ref_audio = parts
+            else:
+                # Legacy format: clone:<ref_audio_path>
+                ref_audio = parts[1]
+                voice = "serena"  # default female
             model_id = _CLONE_MODEL
-            # Pick a base speaker that roughly matches (male default)
-            voice = "aiden"
             ref_audio_escaped = ref_audio.replace("\\", "\\\\").replace('"', '\\"')
             ref_audio_arg = f'    ref_audio="{ref_audio_escaped}",\n'
-            logger.info(f"MLX-Audio voice clone: {os.path.basename(ref_audio)} -> {text[:50]}...")
+            logger.info(f"MLX-Audio voice clone: speaker={voice}, ref={os.path.basename(ref_audio)}")
         else:
             # Preset voice mode — use Kokoro model (faster, no ref audio)
             model_id = _KOKORO_MODEL
