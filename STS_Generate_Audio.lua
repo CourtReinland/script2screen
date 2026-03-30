@@ -67,7 +67,7 @@ local win = disp:AddWindow({
         },
         ui:HGroup{
             ui:Button{ID = "CloneVoice", Text = "Clone Voice", Weight = 0.3},
-            ui:HGap(0, Weight = 0.7),
+            ui:Label{Text = "", Weight = 0.7},
         },
         ui:HGroup{
             ui:Label{Text = "Provider:", Weight = 0.15},

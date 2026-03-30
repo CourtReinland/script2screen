@@ -83,7 +83,7 @@ local win = disp:AddWindow({
         ui:HGroup{
             ui:Label{Text = "Duration (sec):", Weight = 0.2},
             ui:SpinBox{ID = "Duration", Value = prefillDuration, Minimum = 2, Maximum = 15, Weight = 0.3},
-            ui:HGap(0, Weight = 0.5),
+            ui:Label{Text = "", Weight = 0.5},
         },
         ui:HGroup{
             ui:Label{Text = "Provider:", Weight = 0.2},

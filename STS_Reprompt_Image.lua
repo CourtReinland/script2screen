@@ -28,14 +28,14 @@ local outputDir = STS_getOutputDir(projectSlug)
 local clipInfo = STS_getSelectedMediaPoolClip()
 local prefillPrompt = ""
 local prefillStyleRef = ""
-local prefillCharRefs = ""
 local prefillShotKey = ""
 local prefillProvider = config.imageProvider or "grok"
+-- Character refs: table of {name=..., path=...} entries
+local charRefEntries = {}
 
 if clipInfo and clipInfo.status == "ok" then
     local stsFilename = STS_extractFilename(clipInfo.comments or "")
     if stsFilename then
-        -- Look up metadata in manifest
         local metaResult = STS_runPython(
             'from script_to_screen.manifest import lookup_by_filename\n'
             .. 'entry = lookup_by_filename("' .. projectSlug .. '", "' .. stsFilename .. '")\n'
@@ -52,13 +52,33 @@ if clipInfo and clipInfo.status == "ok" then
                 prefillStyleRef = meta.data.style_reference_path or ""
                 prefillShotKey = meta.data.shot_key or ""
                 prefillProvider = meta.data.provider or prefillProvider
-                -- Serialize character refs back to display
                 if meta.data.character_refs then
-                    local parts = {}
                     for name, path in pairs(meta.data.character_refs) do
-                        table.insert(parts, name .. ": " .. path)
+                        table.insert(charRefEntries, {name = name, path = path})
                     end
-                    prefillCharRefs = table.concat(parts, "\n")
+                end
+            end
+        end
+    end
+
+    -- Also load character refs from the project manifest
+    if #charRefEntries == 0 then
+        local charResult = STS_runPython(
+            'from script_to_screen.manifest import load_manifest\n'
+            .. 'm = load_manifest("' .. projectSlug .. '")\n'
+            .. 'chars = {}\n'
+            .. 'for name, data in m.get("characters", {}).items():\n'
+            .. '    ref = data.get("reference_image_path", "")\n'
+            .. '    if ref:\n'
+            .. '        chars[name] = ref\n'
+            .. 'print(json.dumps({"status":"ok", "chars": chars}))\n'
+        )
+        local jStr = charResult and charResult:match("(%{.+%})")
+        if jStr then
+            local cData = STS_JSON.decode(jStr)
+            if cData and cData.chars then
+                for name, path in pairs(cData.chars) do
+                    table.insert(charRefEntries, {name = name, path = path})
                 end
             end
         end
@@ -72,34 +92,36 @@ end
 local win = disp:AddWindow({
     ID = "STS_RepromptImg",
     WindowTitle = "ScriptToScreen — Reprompt Image",
-    Geometry = {200, 150, 620, 520},
+    Geometry = {200, 100, 650, 620},
 }, {
     ui:VGroup{
         ui:Label{Text = "<h3>Reprompt Image</h3>", Alignment = {AlignHCenter = true}},
         ui:HGroup{
-            ui:Label{Text = "Selected Clip:", Weight = 0.2},
-            ui:Label{ID = "ClipName", Text = (clipInfo and clipInfo.status == "ok") and clipInfo.name or "(none — select a clip in Media Pool first)", Weight = 0.7},
+            ui:Label{Text = "Selected Clip:", Weight = 0.15},
+            ui:Label{ID = "ClipName", Text = (clipInfo and clipInfo.status == "ok") and clipInfo.name or "(none — select a clip first)", Weight = 0.75},
             ui:Button{ID = "RefreshClip", Text = "Refresh", Weight = 0.1},
         },
         ui:HGroup{
-            ui:Label{Text = "Shot Key:", Weight = 0.2},
-            ui:LineEdit{ID = "ShotKey", Text = prefillShotKey, Weight = 0.8},
+            ui:Label{Text = "Shot Key:", Weight = 0.15},
+            ui:LineEdit{ID = "ShotKey", Text = prefillShotKey, Weight = 0.85},
         },
         ui:Label{Text = "Prompt:"},
         ui:TextEdit{ID = "PromptEdit", PlainText = prefillPrompt, MinimumSize = {100, 120}},
+        ui:Label{Text = "<b>Style Reference:</b>"},
         ui:HGroup{
-            ui:Label{Text = "Style Reference:", Weight = 0.2},
-            ui:LineEdit{ID = "StyleRefPath", Text = prefillStyleRef, Weight = 0.7},
-            ui:Button{ID = "BrowseStyleRef", Text = "...", Weight = 0.1},
+            ui:LineEdit{ID = "StyleRefPath", Text = prefillStyleRef, Weight = 0.85},
+            ui:Button{ID = "BrowseStyleRef", Text = "...", Weight = 0.15},
+        },
+        ui:Label{Text = "<b>Character References:</b> (add up to 3)"},
+        ui:Tree{ID = "CharRefTree", HeaderHidden = false, MinimumSize = {400, 80}},
+        ui:HGroup{
+            ui:Button{ID = "AddCharRef", Text = "Add Character Ref", Weight = 0.35},
+            ui:Button{ID = "RemoveCharRef", Text = "Remove Selected", Weight = 0.35},
+            ui:Label{Text = "", Weight = 0.3},
         },
         ui:HGroup{
-            ui:Label{Text = "Character Ref:", Weight = 0.2},
-            ui:LineEdit{ID = "CharRefPath", Text = prefillCharRefs, PlaceholderText = "name: /path/to/ref.png", Weight = 0.7},
-            ui:Button{ID = "BrowseCharRef", Text = "...", Weight = 0.1},
-        },
-        ui:HGroup{
-            ui:Label{Text = "Provider:", Weight = 0.2},
-            ui:ComboBox{ID = "ProviderCombo", Weight = 0.8},
+            ui:Label{Text = "Provider:", Weight = 0.15},
+            ui:ComboBox{ID = "ProviderCombo", Weight = 0.85},
         },
         ui:VGap(5),
         ui:HGroup{
@@ -112,7 +134,23 @@ local win = disp:AddWindow({
 
 local itm = win:GetItems()
 
--- Populate provider combo
+-- Setup character ref tree
+local hdr = itm.CharRefTree:NewItem()
+hdr.Text[0] = "Character"
+hdr.Text[1] = "Reference Image"
+itm.CharRefTree:SetHeaderItem(hdr)
+itm.CharRefTree.ColumnCount = 2
+itm.CharRefTree.ColumnWidth[0] = 120
+itm.CharRefTree.ColumnWidth[1] = 350
+
+-- Populate with pre-filled entries
+for _, entry in ipairs(charRefEntries) do
+    local item = itm.CharRefTree:NewItem()
+    item.Text[0] = entry.name
+    item.Text[1] = entry.path
+    itm.CharRefTree:AddTopLevelItem(item)
+end
+
 STS_populateProviderCombo(itm.ProviderCombo, STS_imageProviders, prefillProvider)
 
 -- ============================================================
@@ -126,6 +164,27 @@ function win.On.RefreshClip.Clicked(ev)
     clipInfo = STS_getSelectedMediaPoolClip()
     if clipInfo and clipInfo.status == "ok" then
         itm.ClipName.Text = clipInfo.name
+        -- Re-lookup manifest
+        local stsFilename = STS_extractFilename(clipInfo.comments or "")
+        if stsFilename then
+            local metaResult = STS_runPython(
+                'from script_to_screen.manifest import lookup_by_filename\n'
+                .. 'entry = lookup_by_filename("' .. projectSlug .. '", "' .. stsFilename .. '")\n'
+                .. 'if entry:\n'
+                .. '    print(json.dumps({"status":"ok", "data": entry}))\n'
+                .. 'else:\n'
+                .. '    print(json.dumps({"status":"not_found"}))\n'
+            )
+            local jStr = metaResult and metaResult:match("(%{.+%})")
+            if jStr then
+                local meta = STS_JSON.decode(jStr)
+                if meta and meta.status == "ok" and meta.data then
+                    itm.PromptEdit.PlainText = meta.data.prompt or ""
+                    itm.StyleRefPath.Text = meta.data.style_reference_path or ""
+                    itm.ShotKey.Text = meta.data.shot_key or ""
+                end
+            end
+        end
     else
         itm.ClipName.Text = "(none)"
     end
@@ -136,9 +195,24 @@ function win.On.BrowseStyleRef.Clicked(ev)
     if path and path ~= "" then itm.StyleRefPath.Text = path end
 end
 
-function win.On.BrowseCharRef.Clicked(ev)
+function win.On.AddCharRef.Clicked(ev)
     local path = fu:RequestFile("Select Character Reference Image")
-    if path and path ~= "" then itm.CharRefPath.Text = path end
+    if path and path ~= "" then
+        -- Ask for character name (use filename stem as default)
+        local basename = path:match("([^/]+)$") or "Character"
+        local name = basename:match("^(.-)_") or basename:match("^(.-)%.") or "Character"
+        local item = itm.CharRefTree:NewItem()
+        item.Text[0] = name:upper()
+        item.Text[1] = path
+        itm.CharRefTree:AddTopLevelItem(item)
+    end
+end
+
+function win.On.RemoveCharRef.Clicked(ev)
+    local selected = itm.CharRefTree:CurrentItem()
+    if selected then
+        itm.CharRefTree:TakeTopLevelItem(itm.CharRefTree:IndexOfTopLevelItem(selected))
+    end
 end
 
 function win.On.Generate.Clicked(ev)
@@ -157,22 +231,38 @@ function win.On.Generate.Clicked(ev)
     local serverUrl = STS_getProviderServerUrl(config, providerId)
     local shotKey = itm.ShotKey.Text
     local styleRef = itm.StyleRefPath.Text
-    local charRefStr = itm.CharRefPath.Text
 
-    -- Write API key to temp file for security
+    -- Build character refs JSON from the tree
+    local charRefParts = {}
+    local topCount = itm.CharRefTree:TopLevelItemCount()
+    for i = 0, topCount - 1 do
+        local treeItem = itm.CharRefTree:TopLevelItem(i)
+        if treeItem then
+            local name = treeItem.Text[0] or ""
+            local path = treeItem.Text[1] or ""
+            if name ~= "" and path ~= "" then
+                local safeName = name:gsub('"', '\\"')
+                local safePath = path:gsub("\\", "\\\\"):gsub('"', '\\"')
+                table.insert(charRefParts, '"' .. safeName .. '":"' .. safePath .. '"')
+            end
+        end
+    end
+    local charRefsJson = "{" .. table.concat(charRefParts, ",") .. "}"
+
+    -- Write API key to temp file
     local keyfile = os.tmpname()
     local kf = io.open(keyfile, "w")
     if kf then kf:write(apiKey); kf:close() end
 
     local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeStyleRef = styleRef:gsub("\\", "\\\\"):gsub('"', '\\"')
-    local safeShotKey = shotKey:gsub('"', '\\"')
-    local safeServerUrl = serverUrl:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeServerUrl = (serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
     local code = 'import traceback\n'
         .. 'try:\n'
         .. '    from script_to_screen.standalone import reprompt_image\n'
         .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
+        .. '    char_refs = json.loads(\'' .. charRefsJson:gsub("'", "\\'") .. '\')\n'
         .. '    result = reprompt_image(\n'
         .. '        prompt=' .. STS_JSON.encode(prompt) .. ',\n'
         .. '        provider_id="' .. providerId .. '",\n'
@@ -180,11 +270,12 @@ function win.On.Generate.Clicked(ev)
         .. '        output_dir="' .. safeOutput .. '",\n'
         .. '        project_slug="' .. projectSlug .. '",\n'
         .. '        style_reference_path="' .. safeStyleRef .. '",\n'
+        .. '        character_ref_paths=char_refs,\n'
         .. '        model="' .. (config.model or "realism") .. '",\n'
         .. '        aspect_ratio="' .. (config.aspectRatio or "widescreen_16_9") .. '",\n'
         .. '        creative_detailing=' .. tostring(config.detailing or 33) .. ',\n'
         .. '        server_url="' .. safeServerUrl .. '",\n'
-        .. '        shot_key="' .. safeShotKey .. '",\n'
+        .. '        shot_key="' .. (shotKey or ""):gsub('"', '\\"') .. '",\n'
         .. '    )\n'
         .. '    print(json.dumps(result))\n'
         .. 'except Exception as e:\n'
@@ -197,7 +288,6 @@ function win.On.Generate.Clicked(ev)
     if jsonStr then
         local data = STS_JSON.decode(jsonStr)
         if data and data.status == "ok" then
-            -- Import to media bin and tag
             local importResult = STS_importAndTag(data.file_path, "Images")
             itm.StatusLabel.Text = "Image generated! " .. (data.filename or "")
             itm.StatusLabel.StyleSheet = "color: green; font-weight: bold;"

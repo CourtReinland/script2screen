@@ -83,21 +83,35 @@ def build_image_prompt(
                 action = action[:200].rsplit(" ", 1)[0] + "..."
             parts.append(action)
 
-    # 7. Dialogue context — critical for character expressions and gestures
+    # 7. Dialogue context — describe the emotional tone and interaction
+    #    Do NOT include the actual dialogue text in quotes — that causes the
+    #    image generator to render the text as a speech bubble or overlay.
+    #    Instead, describe what is happening emotionally and physically.
     if shot_dialogue:
-        dialogue_parts = []
-        for dl in shot_dialogue:
-            dialogue_parts.append(f'{dl.character} says: "{dl.text}"')
-        dialogue_context = " ".join(dialogue_parts)
-        parts.append(f"In this moment, {dialogue_context}")
-
-    # 8. Infer physical action from dialogue if shot description was sparse
-    if not desc_has_action and shot_dialogue:
         if len(shot_dialogue) >= 2:
-            parts.append("The characters are facing each other, engaged in conversation.")
+            speakers = list({dl.character for dl in shot_dialogue})
+            parts.append(
+                f"{' and '.join(speakers)} are in conversation, "
+                f"facing each other with expressive gestures."
+            )
+            # Infer tone from the dialogue content
+            all_text = " ".join(dl.text for dl in shot_dialogue).lower()
+            if any(w in all_text for w in ["why", "what", "how", "?"]):
+                parts.append("The tone is questioning and uncertain.")
+            elif any(w in all_text for w in ["no", "stop", "don't", "can't"]):
+                parts.append("The tone is tense and resistant.")
+            elif any(w in all_text for w in ["please", "help", "need"]):
+                parts.append("The tone is earnest and pleading.")
         elif len(shot_dialogue) == 1:
-            speaker = shot_dialogue[0].character
-            parts.append(f"{speaker} is speaking, animated expression.")
+            dl = shot_dialogue[0]
+            text_lower = dl.text.lower()
+            parts.append(f"{dl.character} is speaking with an animated expression.")
+            if any(w in text_lower for w in ["!", "got to", "must", "swear"]):
+                parts.append(f"{dl.character} appears determined and emphatic.")
+            elif "?" in dl.text:
+                parts.append(f"{dl.character} has a questioning, curious look.")
+            elif any(w in text_lower for w in ["ok", "sure", "fine", "let"]):
+                parts.append(f"{dl.character} appears agreeable, making a decision.")
 
     prompt = " ".join(p for p in parts if p)
 
