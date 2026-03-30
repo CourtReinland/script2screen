@@ -20,28 +20,35 @@ from .providers import VoiceProvider
 
 logger = logging.getLogger("ScriptToScreen")
 
-# Available preset voices in Kokoro
+# Preset voices for Kokoro (fast, no cloning)
 KOKORO_VOICES = {
-    # American English - Female
     "af_heart": "Heart (Female, American)",
     "af_bella": "Bella (Female, American)",
     "af_nova": "Nova (Female, American)",
     "af_sky": "Sky (Female, American)",
-    # American English - Male
     "am_adam": "Adam (Male, American)",
     "am_echo": "Echo (Male, American)",
-    # British English - Female
     "bf_alice": "Alice (Female, British)",
     "bf_emma": "Emma (Female, British)",
-    # British English - Male
     "bm_daniel": "Daniel (Male, British)",
     "bm_george": "George (Male, British)",
+}
+
+# Preset voices for Qwen3-TTS CustomVoice (voice cloning capable)
+QWEN3_VOICES = {
+    "aiden": "Aiden (Male)",
+    "ryan": "Ryan (Male)",
+    "eric": "Eric (Male)",
+    "dylan": "Dylan (Male)",
+    "serena": "Serena (Female)",
+    "vivian": "Vivian (Female)",
 }
 
 # Default venv location
 _MLX_VENV = Path.home() / "Library" / "Application Support" / "ScriptToScreen" / "mlx-venv"
 _MLX_PYTHON = _MLX_VENV / "bin" / "python3"
-_MODEL_ID = "mlx-community/Kokoro-82M-bf16"
+_KOKORO_MODEL = "mlx-community/Kokoro-82M-bf16"
+_CLONE_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
 
 
 class MLXAudioVoiceProvider(VoiceProvider):
@@ -80,23 +87,31 @@ class MLXAudioVoiceProvider(VoiceProvider):
             return False, f"Error: {e}"
 
     def clone_voice(self, name: str, audio_paths: list[str], **kwargs) -> str:
-        """Voice cloning via reference audio (Kokoro supports this via CSM).
+        """Clone a voice by storing the reference audio path.
 
-        For now, returns a preset voice ID. Full voice cloning with
-        reference audio requires the CSM model.
+        The Qwen3-TTS CustomVoice model performs voice cloning at generation
+        time using the reference audio, so 'cloning' here just validates
+        and stores the reference path. The actual cloning happens in
+        generate_speech() when ref_audio is passed.
+
+        Returns a voice_id in the format 'clone:<ref_audio_path>' which
+        generate_speech() will parse to extract the reference audio.
         """
-        # Map common character names to fitting preset voices
-        name_upper = name.upper()
-        if any(f in name_upper for f in ["GIRL", "WOMAN", "FEMALE", "MOM", "MOTHER",
-                                          "ALIYAH", "LISA", "LAUREN"]):
-            voice_id = "af_bella"
-        elif any(m in name_upper for m in ["BOY", "MAN", "MALE", "DAD", "FATHER",
-                                            "AIDEN", "MAX", "ETHAN"]):
-            voice_id = "am_adam"
-        else:
-            voice_id = "af_heart"  # default
+        if not audio_paths:
+            raise ValueError("No audio samples provided for voice cloning")
 
-        logger.info(f"MLX-Audio: mapped '{name}' to preset voice '{voice_id}'")
+        ref_path = audio_paths[0]  # Use the first sample
+        if not os.path.isfile(ref_path):
+            raise FileNotFoundError(f"Voice sample not found: {ref_path}")
+
+        # Check file size (recommend 5-30 seconds of clean audio)
+        size = os.path.getsize(ref_path)
+        if size < 10000:
+            logger.warning(f"Voice sample is very small ({size} bytes). "
+                           f"Recommend 5-30 seconds of clean speech.")
+
+        voice_id = f"clone:{ref_path}"
+        logger.info(f"MLX-Audio: voice clone registered for '{name}' -> {os.path.basename(ref_path)}")
         return voice_id
 
     def generate_speech(
@@ -108,34 +123,46 @@ class MLXAudioVoiceProvider(VoiceProvider):
     ) -> str:
         """Generate speech using MLX-Audio in a subprocess.
 
-        Runs in the Python 3.12 venv since mlx-audio needs spacy.
+        If voice_id starts with 'clone:', uses the CustomVoice model
+        with the reference audio for voice cloning. Otherwise uses
+        the Kokoro model with preset voices.
         """
-        # Ensure .wav extension
         save_path_wav = save_path
         if not save_path.lower().endswith(".wav"):
             save_path_wav = str(Path(save_path).with_suffix(".wav"))
 
-        # Use voice_id as Kokoro voice name, fallback to default
-        voice = voice_id if voice_id in KOKORO_VOICES else self.voice
-
-        # Create temp output directory for mlx-audio
         import tempfile
         out_dir = tempfile.mkdtemp(prefix="sts_mlx_")
 
-        # Build Python script to run in subprocess
+        # Determine model and voice based on voice_id
+        if voice_id.startswith("clone:"):
+            # Voice cloning mode — use CustomVoice model + reference audio
+            ref_audio = voice_id[6:]  # Strip 'clone:' prefix
+            model_id = _CLONE_MODEL
+            # Pick a base speaker that roughly matches (male default)
+            voice = "aiden"
+            ref_audio_escaped = ref_audio.replace("\\", "\\\\").replace('"', '\\"')
+            ref_audio_arg = f'    ref_audio="{ref_audio_escaped}",\n'
+            logger.info(f"MLX-Audio voice clone: {os.path.basename(ref_audio)} -> {text[:50]}...")
+        else:
+            # Preset voice mode — use Kokoro model (faster, no ref audio)
+            model_id = _KOKORO_MODEL
+            voice = voice_id if voice_id in KOKORO_VOICES else self.voice
+            ref_audio_arg = ""
+            logger.info(f"MLX-Audio preset voice: {voice} -> {text[:50]}...")
+
         script = f'''
 import os, sys, shutil
 from mlx_audio.tts.generate import load_model, generate_audio
 
-model = load_model("{_MODEL_ID}")
+model = load_model("{model_id}")
 generate_audio(
     model=model,
     text={json.dumps(text)},
     voice="{voice}",
-    output_path="{out_dir}",
+{ref_audio_arg}    output_path="{out_dir}",
 )
 
-# Move the generated file to the target path
 src = os.path.join("{out_dir}", "audio_000.wav")
 if os.path.isfile(src):
     shutil.move(src, "{save_path_wav}")
@@ -144,38 +171,34 @@ else:
     print("ERROR:No audio file generated")
 '''
 
-        logger.info(f"MLX-Audio generating: {text[:60]}... (voice={voice})")
-
         try:
             result = subprocess.run(
                 [self._python, "-c", script],
                 capture_output=True, text=True,
-                timeout=120,  # 2 minute timeout (MLX is fast)
+                timeout=180,  # 3 min timeout for voice cloning
             )
 
-            # Clean up temp dir
             shutil.rmtree(out_dir, ignore_errors=True)
 
-            # Parse result
             for line in result.stdout.strip().split("\n"):
                 if line.startswith("OK:"):
                     actual_path = line[3:]
                     if os.path.isfile(actual_path):
                         size = os.path.getsize(actual_path)
-                        logger.info(f"MLX-Audio speech saved: {actual_path} ({size:,} bytes)")
+                        logger.info(f"MLX-Audio saved: {actual_path} ({size:,} bytes)")
                         return actual_path
                 elif line.startswith("ERROR:"):
                     raise RuntimeError(line[6:])
 
-            # If we get here, check stderr
             if result.returncode != 0:
-                raise RuntimeError(f"MLX-Audio subprocess failed: {result.stderr[:300]}")
+                err = result.stderr[-500:] if result.stderr else "(no stderr)"
+                raise RuntimeError(f"MLX-Audio failed: {err}")
 
             raise RuntimeError("No audio output from MLX-Audio")
 
         except subprocess.TimeoutExpired:
             shutil.rmtree(out_dir, ignore_errors=True)
-            raise RuntimeError("MLX-Audio generation timed out (>120s)")
+            raise RuntimeError("MLX-Audio generation timed out (>180s)")
 
     def list_voices(self) -> list[dict]:
         """List available Kokoro preset voices."""
