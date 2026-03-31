@@ -270,7 +270,8 @@ STS_voiceProviders = {
 }
 
 STS_lipsyncProviders = {
-    {id = "freepik",      name = "Kling Lip Sync (Cloud)"},
+    {id = "kling",        name = "Kling AI Lip Sync (Direct API)"},
+    {id = "freepik",      name = "Kling via Freepik (Cloud)"},
 }
 
 -- ============================================================

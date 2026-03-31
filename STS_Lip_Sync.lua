@@ -61,7 +61,7 @@ local win = disp:AddWindow({
 })
 
 local itm = win:GetItems()
-STS_populateProviderCombo(itm.ProviderCombo, STS_lipsyncProviders, "freepik")
+STS_populateProviderCombo(itm.ProviderCombo, STS_lipsyncProviders, "kling")
 
 function win.On.STS_LipSync.Close(ev) disp:ExitLoop() end
 function win.On.Cancel.Clicked(ev) disp:ExitLoop() end
