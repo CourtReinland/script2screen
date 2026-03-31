@@ -48,7 +48,7 @@ QWEN3_VOICES = {
 _MLX_VENV = Path.home() / "Library" / "Application Support" / "ScriptToScreen" / "mlx-venv"
 _MLX_PYTHON = _MLX_VENV / "bin" / "python3"
 _KOKORO_MODEL = "mlx-community/Kokoro-82M-bf16"
-_CLONE_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
+_CLONE_MODEL = "mlx-community/chatterbox-fp16"
 
 
 class MLXAudioVoiceProvider(VoiceProvider):
@@ -177,18 +177,20 @@ class MLXAudioVoiceProvider(VoiceProvider):
 
         # Determine model and voice based on voice_id
         if voice_id.startswith("clone:"):
-            # Voice cloning mode — format: clone:<base_speaker>:<ref_audio_path>
+            # Voice cloning mode — Chatterbox uses ref_audio directly
+            # Format: clone:<base_speaker>:<ref_audio_path>
             parts = voice_id.split(":", 2)
             if len(parts) == 3:
-                _, voice, ref_audio = parts
-            else:
-                # Legacy format: clone:<ref_audio_path>
+                _, _base, ref_audio = parts
+            elif len(parts) == 2:
                 ref_audio = parts[1]
-                voice = "serena"  # default female
+            else:
+                raise ValueError(f"Invalid clone voice_id: {voice_id}")
             model_id = _CLONE_MODEL
+            voice = "af_heart"  # Chatterbox ignores this when ref_audio is provided
             ref_audio_escaped = ref_audio.replace("\\", "\\\\").replace('"', '\\"')
             ref_audio_arg = f'    ref_audio="{ref_audio_escaped}",\n'
-            logger.info(f"MLX-Audio voice clone: speaker={voice}, ref={os.path.basename(ref_audio)}")
+            logger.info(f"MLX-Audio Chatterbox clone: ref={os.path.basename(ref_audio)}")
         else:
             # Preset voice mode — use Kokoro model (faster, no ref audio)
             model_id = _KOKORO_MODEL
