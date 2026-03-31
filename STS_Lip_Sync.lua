@@ -18,11 +18,61 @@ local config = STS_loadConfig()
 local projectSlug, projectName = STS_getResolveProjectSlug()
 local outputDir = STS_getOutputDir(projectSlug)
 
--- Detect current timeline clip for video source
-local clipInfo = STS_getCurrentTimelineItem()
+-- Detect current clip for video source (media pool selection first, then timeline)
+local clipInfo = STS_getSelectedMediaPoolClip()
+if not clipInfo or clipInfo.status ~= "ok" or (clipInfo.comments or "") == "" then
+    clipInfo = STS_getCurrentTimelineItem()
+end
+
 local videoFilePath = ""
+local prefillAudioPath = ""
+local prefillShotKey = ""
+
 if clipInfo and clipInfo.status == "ok" then
     videoFilePath = clipInfo.file_path or ""
+    local clipName = clipInfo.name or ""
+    local stsFilename = STS_extractFilename(clipInfo.comments or "")
+
+    -- Extract shot key from filename
+    local shotKeyFromName = clipName:match("^(s%d+_sh%d+)")
+    if not shotKeyFromName and stsFilename then
+        shotKeyFromName = stsFilename:match("^(s%d+_sh%d+)")
+    end
+    if shotKeyFromName then
+        prefillShotKey = shotKeyFromName
+    end
+
+    -- Find matching audio file using shot_key pattern
+    if prefillShotKey ~= "" then
+        local audioResult = STS_runPython(
+            'import os, glob, re\n'
+            .. 'try:\n'
+            .. '    shot_key = "' .. prefillShotKey .. '"\n'
+            .. '    audio_dir = "' .. outputDir:gsub("\\", "\\\\"):gsub('"', '\\"') .. '/audio"\n'
+            .. '    dialogue_dir = os.path.join(audio_dir, "dialogue_audio")\n'
+            .. '    found = ""\n'
+            .. '    # Search in both audio/ and audio/dialogue_audio/\n'
+            .. '    for search_dir in [audio_dir, dialogue_dir]:\n'
+            .. '        if not os.path.isdir(search_dir): continue\n'
+            .. '        for f in sorted(glob.glob(os.path.join(search_dir, "*.wav")) + glob.glob(os.path.join(search_dir, "*.mp3")), reverse=True):\n'
+            .. '            bn = os.path.basename(f)\n'
+            .. '            m = re.match(r"(s\\d+_sh\\d+)", bn)\n'
+            .. '            if m and m.group(1) == shot_key:\n'
+            .. '                found = f\n'
+            .. '                break\n'
+            .. '        if found: break\n'
+            .. '    print(json.dumps({"status":"ok", "audio_path": found}))\n'
+            .. 'except Exception as e:\n'
+            .. '    print(json.dumps({"status":"error", "error": str(e)}))\n'
+        )
+        local jStr = audioResult and audioResult:match("(%{.+%})")
+        if jStr then
+            local aData = STS_JSON.decode(jStr)
+            if aData and aData.status == "ok" and aData.audio_path and aData.audio_path ~= "" then
+                prefillAudioPath = aData.audio_path
+            end
+        end
+    end
 end
 
 -- ============================================================
@@ -44,7 +94,7 @@ local win = disp:AddWindow({
         },
         ui:HGroup{
             ui:Label{Text = "Audio Source:", Weight = 0.15},
-            ui:LineEdit{ID = "AudioPath", Text = "", PlaceholderText = "Select audio file...", Weight = 0.75},
+            ui:LineEdit{ID = "AudioPath", Text = prefillAudioPath, PlaceholderText = "Select audio file...", Weight = 0.75},
             ui:Button{ID = "BrowseAudio", Text = "...", Weight = 0.1},
         },
         ui:HGroup{
@@ -56,7 +106,7 @@ local win = disp:AddWindow({
             ui:Button{ID = "Generate", Text = "Generate Lip Sync", Weight = 0.5},
             ui:Button{ID = "Cancel", Text = "Cancel", Weight = 0.5},
         },
-        ui:Label{ID = "StatusLabel", Text = "Ready — select a video clip and audio file", StyleSheet = "color: #888;"},
+        ui:Label{ID = "StatusLabel", Text = (prefillShotKey ~= "" and ("Detected: " .. prefillShotKey) or "Ready — select a video clip and audio file"), StyleSheet = "color: #888;"},
     },
 })
 
@@ -130,6 +180,7 @@ function win.On.Generate.Clicked(ev)
         .. '        output_dir="' .. safeOutput .. '",\n'
         .. '        project_slug="' .. projectSlug .. '",\n'
         .. '        server_url="' .. (serverUrl or ""):gsub('"', '\\"') .. '",\n'
+        .. '        shot_key="' .. (prefillShotKey or ""):gsub('"', '\\"') .. '",\n'
         .. '    )\n'
         .. '    print(json.dumps(result))\n'
         .. 'except Exception as e:\n'

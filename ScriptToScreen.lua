@@ -362,6 +362,9 @@ local config = {
     model = "realism",
     aspectRatio = "widescreen_16_9",
     detailing = 33,
+    -- Episode info
+    episodeNumber = "",
+    episodeTitle = "",
 }
 
 local screenplayData = nil -- parsed screenplay (Lua table from JSON)
@@ -383,10 +386,28 @@ do
     end
 end
 local outputDir = homeDir .. "/Library/Application Support/ScriptToScreen/projects/" .. projectSlug
-os.execute('mkdir -p "' .. outputDir .. '/images"')
-os.execute('mkdir -p "' .. outputDir .. '/videos"')
-os.execute('mkdir -p "' .. outputDir .. '/audio"')
-os.execute('mkdir -p "' .. outputDir .. '/lipsync"')
+os.execute('mkdir -p "' .. outputDir .. '"')
+
+-- Helper: get the scene-based output sub-directory
+-- Structure: outputDir/{episodePrefix}/S{sceneNum}/{mediaType}
+-- Falls back to outputDir/{mediaType} if no episode prefix
+local function getSceneMediaDir(sceneNum, mediaType)
+    if episodePrefix ~= "" then
+        local dir = outputDir .. "/" .. episodePrefix .. "/S" .. tostring(sceneNum) .. "/" .. mediaType
+        os.execute('mkdir -p "' .. dir .. '"')
+        return dir
+    else
+        local dir = outputDir .. "/" .. mediaType
+        os.execute('mkdir -p "' .. dir .. '"')
+        return dir
+    end
+end
+
+-- Helper: extract scene number from shot_key (e.g. "s2_sh1" -> 2)
+local function sceneNumFromShotKey(shotKey)
+    local num = shotKey:match("^s(%d+)")
+    return tonumber(num) or 0
+end
 
 -- Load saved config
 local configDir = homeDir .. "/Library/Application Support/ScriptToScreen"
@@ -438,9 +459,29 @@ do
             config.model = saved.model or "realism"
             config.aspectRatio = saved.aspectRatio or "widescreen_16_9"
             config.detailing = saved.detailing or 33
+            config.episodeNumber = saved.episodeNumber or ""
+            config.episodeTitle = saved.episodeTitle or ""
         end
     end
 end
+
+-- Build episode prefix from config
+local function buildEpisodePrefix()
+    local num = config.episodeNumber or ""
+    local title = config.episodeTitle or ""
+    if num == "" and title == "" then return "" end
+    -- Sanitize: remove spaces and special chars
+    local sanitizedTitle = title:gsub("[^%w]", "")
+    if num ~= "" and sanitizedTitle ~= "" then
+        return "Ep" .. num .. "-" .. sanitizedTitle
+    elseif num ~= "" then
+        return "Ep" .. num
+    else
+        return sanitizedTitle
+    end
+end
+
+local episodePrefix = buildEpisodePrefix()
 
 local function saveConfig()
     os.execute('mkdir -p "' .. configDir .. '"')
@@ -488,6 +529,15 @@ local win = disp:AddWindow({
                         .. "<p style='font-size:11px'>AI Filmmaking — screenplay to timeline with AI visuals, voice acting, and lip-sync</p>",
                     Alignment = {AlignHCenter = true},
                     StyleSheet = "padding: 4px;",
+                },
+
+                -- Episode Info
+                ui:Label{Text = "<b>Episode Info</b>", StyleSheet = "padding-top: 6px;"},
+                ui:HGroup{
+                    ui:Label{Text = "Episode #:", Weight = 0.15},
+                    ui:LineEdit{ID = "EpisodeNumber", PlaceholderText = "e.g. 1", Weight = 0.2},
+                    ui:Label{Text = "Episode Title:", Weight = 0.15},
+                    ui:LineEdit{ID = "EpisodeTitle", PlaceholderText = "e.g. The Arrival", Weight = 0.5},
                 },
 
                 -- Image Provider
@@ -911,6 +961,10 @@ itm.ImageServerUrl.Text = config.providers.comfyui.serverUrl
 itm.VideoServerUrl.Text = config.providers.comfyui.serverUrl
 itm.VoiceServerUrl.Text = config.providers.voicebox and config.providers.voicebox.serverUrl or "http://127.0.0.1:17493"
 
+-- Initialize episode fields from saved config
+itm.EpisodeNumber.Text = config.episodeNumber or ""
+itm.EpisodeTitle.Text = config.episodeTitle or ""
+
 -- Initialize field visibility
 updateImageProviderFields()
 updateVideoProviderFields()
@@ -949,6 +1003,10 @@ end
 local function onNext()
     -- Save config when leaving step 1
     if currentStep == 1 then
+        -- Save episode info
+        config.episodeNumber = itm.EpisodeNumber.Text or ""
+        config.episodeTitle = itm.EpisodeTitle.Text or ""
+        episodePrefix = buildEpisodePrefix()
         -- Save provider selections
         config.imageProvider = getImageProviderId(itm.ImageProviderCombo.CurrentIndex)
         config.videoProvider = getVideoProviderId(itm.VideoProviderCombo.CurrentIndex)
@@ -1292,6 +1350,9 @@ function win.On.ParseScript.Clicked(ev)
                 itm.ScriptSummary.PlainText = data.trace or data.error
             elseif data then
                 screenplayData = data
+                -- Save script path in config so standalone tools can find it
+                config.lastScriptPath = itm.ScriptPath.Text
+                saveConfig()
                 itm.ParseStatus.Text = "Parsed successfully!"
                 itm.ParseStatus.StyleSheet = "color: green; font-weight: bold;"
 
@@ -1520,48 +1581,48 @@ function win.On.GenAllImages.Clicked(ev)
             local totalShots = data.total_shots or 0
             local errs = data.errors or {}
             if count > 0 then
-                -- Import generated images to Resolve media pool immediately
+                -- Import generated images to Resolve media pool (scene-based bins)
                 local importMsg = ""
                 local importOk, importErr = pcall(function()
                     local project = resolve:GetProjectManager():GetCurrentProject()
                     if project then
                         local mp = project:GetMediaPool()
                         local rootF = mp:GetRootFolder()
-                        -- Find or create ScriptToScreen/Images bin
+                        -- Find or create ScriptToScreen bin
                         local stsBin2 = nil
                         for _, folder in pairs(rootF:GetSubFolders() or {}) do
                             if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
                         end
                         if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
-                        local imgBin2 = nil
-                        if stsBin2 then
-                            for _, folder in pairs(stsBin2:GetSubFolders() or {}) do
-                                if folder:GetName() == "Images" then imgBin2 = folder; break end
+                        -- Helper: find or create nested bin path under stsBin2
+                        local function findOrCreateBin(parent, name)
+                            for _, folder in pairs(parent:GetSubFolders() or {}) do
+                                if folder:GetName() == name then return folder end
                             end
-                            if not imgBin2 then imgBin2 = mp:AddSubFolder(stsBin2, "Images") end
+                            return mp:AddSubFolder(parent, name)
                         end
-                        if imgBin2 then mp:SetCurrentFolder(imgBin2) end
-                        -- Collect image files to import
-                        local imgFilesToImport = {}
-                        for _, imgPath in pairs(generatedImages) do
+                        -- Import one-at-a-time, routing to scene-based bins
+                        local importCount = 0
+                        for shotKey, imgPath in pairs(generatedImages) do
                             if type(imgPath) == "string" then
-                                table.insert(imgFilesToImport, imgPath)
-                            end
-                        end
-                        -- Import one-at-a-time to prevent Resolve image-sequence detection
-                        if #imgFilesToImport > 0 then
-                            local importCount = 0
-                            for _, singlePath in ipairs(imgFilesToImport) do
-                                local items = mp:ImportMedia({singlePath}) or {}
-                                -- Tag each imported clip with STS metadata for lookup
+                                -- Determine target bin: ScriptToScreen/{episodePrefix}/S{N}/Images
+                                local targetBin = stsBin2
+                                if episodePrefix ~= "" then
+                                    targetBin = findOrCreateBin(targetBin, episodePrefix)
+                                end
+                                local sNum = sceneNumFromShotKey(shotKey)
+                                targetBin = findOrCreateBin(targetBin, "S" .. tostring(sNum))
+                                targetBin = findOrCreateBin(targetBin, "Images")
+                                mp:SetCurrentFolder(targetBin)
+                                local items = mp:ImportMedia({imgPath}) or {}
                                 for _, item in ipairs(items) do
-                                    local basename = singlePath:match("([^/]+)$") or ""
+                                    local basename = imgPath:match("([^/]+)$") or ""
                                     pcall(function() item:SetMetadata("Comments", "STS:" .. basename) end)
                                 end
                                 importCount = importCount + #items
                             end
-                            importMsg = " (" .. tostring(importCount) .. " added to bin)"
                         end
+                        importMsg = " (" .. tostring(importCount) .. " added to bin)"
                     end
                 end)
                 if not importOk then
@@ -1755,31 +1816,37 @@ function win.On.GenAllVideos.Clicked(ev)
             local errs = data.errors or {}
             local imgCount = data.image_count or 0
             if count > 0 then
-                -- Import generated videos to ScriptToScreen/Videos bin
+                -- Import generated videos to scene-based bins
                 local importMsg = ""
                 local importOk, importErr = pcall(function()
                     local project = resolve:GetProjectManager():GetCurrentProject()
                     if project then
                         local mp = project:GetMediaPool()
                         local rootF = mp:GetRootFolder()
-                        -- Find or create ScriptToScreen/Videos bin
+                        -- Find or create ScriptToScreen bin
                         local stsBin2 = nil
                         for _, folder in pairs(rootF:GetSubFolders() or {}) do
                             if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
                         end
                         if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
-                        local vidBin = nil
-                        if stsBin2 then
-                            for _, folder in pairs(stsBin2:GetSubFolders() or {}) do
-                                if folder:GetName() == "Videos" then vidBin = folder; break end
+                        local function findOrCreateBin(parent, name)
+                            for _, folder in pairs(parent:GetSubFolders() or {}) do
+                                if folder:GetName() == name then return folder end
                             end
-                            if not vidBin then vidBin = mp:AddSubFolder(stsBin2, "Videos") end
+                            return mp:AddSubFolder(parent, name)
                         end
-                        if vidBin then mp:SetCurrentFolder(vidBin) end
-                        -- Import each video and tag with STS metadata
+                        -- Import each video to scene-based bin
                         local importCount = 0
-                        for _, vidPath in pairs(generatedVideos) do
+                        for shotKey, vidPath in pairs(generatedVideos) do
                             if type(vidPath) == "string" then
+                                local targetBin = stsBin2
+                                if episodePrefix ~= "" then
+                                    targetBin = findOrCreateBin(targetBin, episodePrefix)
+                                end
+                                local sNum = sceneNumFromShotKey(shotKey)
+                                targetBin = findOrCreateBin(targetBin, "S" .. tostring(sNum))
+                                targetBin = findOrCreateBin(targetBin, "Videos")
+                                mp:SetCurrentFolder(targetBin)
                                 local items = mp:ImportMedia({vidPath}) or {}
                                 for _, item in ipairs(items) do
                                     local basename = vidPath:match("([^/]+)$") or ""
@@ -2151,46 +2218,65 @@ function win.On.AssembleBtn.Clicked(ev)
         return
     end
 
-    -- Import images to "ScriptToScreen/Images" sub-bin
-    -- NOTE: Import one-at-a-time to prevent Resolve from detecting them as
-    -- an image sequence (s0_sh0.png, s0_sh1.png → "s0_sh[0-N].png").
+    -- Helper: find or create nested bin
+    local function findOrCreateBin(parent, name)
+        for _, folder in pairs(parent:GetSubFolders() or {}) do
+            if folder:GetName() == name then return folder end
+        end
+        return mediaPool:AddSubFolder(parent, name)
+    end
+
+    -- Import images to scene-based sub-bins
     local importedImages = {}
     if #imageFiles > 0 then
-        local imgBin = nil
-        local stsSubFolders = stsBin and stsBin:GetSubFolders() or {}
-        for _, folder in pairs(stsSubFolders) do
-            if folder:GetName() == "Images" then
-                imgBin = folder
-                break
-            end
-        end
-        if not imgBin and stsBin then
-            imgBin = mediaPool:AddSubFolder(stsBin, "Images")
-        end
-        if imgBin then
-            mediaPool:SetCurrentFolder(imgBin)
-        end
-        -- Import each image individually to avoid sequence detection
         for _, imgPath in ipairs(imageFiles) do
+            local basename = imgPath:match("([^/]+)$") or ""
+            local shotKey = basename:match("^(s%d+_sh%d+)") or ""
+            local targetBin = stsBin
+            if episodePrefix ~= "" and targetBin then
+                targetBin = findOrCreateBin(targetBin, episodePrefix)
+            end
+            if shotKey ~= "" and targetBin then
+                local sNum = sceneNumFromShotKey(shotKey)
+                targetBin = findOrCreateBin(targetBin, "S" .. tostring(sNum))
+                targetBin = findOrCreateBin(targetBin, "Images")
+            elseif targetBin then
+                targetBin = findOrCreateBin(targetBin, "Images")
+            end
+            if targetBin then mediaPool:SetCurrentFolder(targetBin) end
             local items = mediaPool:ImportMedia({imgPath}) or {}
             for _, item in ipairs(items) do
                 table.insert(importedImages, item)
             end
         end
-        -- Return to main STS bin
-        if stsBin then
-            mediaPool:SetCurrentFolder(stsBin)
-        end
+        if stsBin then mediaPool:SetCurrentFolder(stsBin) end
     end
 
-    -- Import videos and audio to main ScriptToScreen bin
-    local allClipFiles = {}
-    for _, f in ipairs(videoFiles) do table.insert(allClipFiles, f) end
-    for _, f in ipairs(audioFiles) do table.insert(allClipFiles, f) end
-
+    -- Import videos and audio to scene-based bins
     local importedClips = {}
-    if #allClipFiles > 0 then
-        importedClips = mediaPool:ImportMedia(allClipFiles) or {}
+    local allClipFiles = {}
+    for _, f in ipairs(videoFiles) do table.insert(allClipFiles, {path = f, type = "Videos"}) end
+    for _, f in ipairs(audioFiles) do table.insert(allClipFiles, {path = f, type = "Audio"}) end
+
+    for _, clipInfo2 in ipairs(allClipFiles) do
+        local basename = clipInfo2.path:match("([^/]+)$") or ""
+        local shotKey = basename:match("^(s%d+_sh%d+)") or ""
+        local targetBin = stsBin
+        if episodePrefix ~= "" and targetBin then
+            targetBin = findOrCreateBin(targetBin, episodePrefix)
+        end
+        if shotKey ~= "" and targetBin then
+            local sNum = sceneNumFromShotKey(shotKey)
+            targetBin = findOrCreateBin(targetBin, "S" .. tostring(sNum))
+            targetBin = findOrCreateBin(targetBin, clipInfo2.type)
+        elseif targetBin then
+            targetBin = findOrCreateBin(targetBin, clipInfo2.type)
+        end
+        if targetBin then mediaPool:SetCurrentFolder(targetBin) end
+        local items = mediaPool:ImportMedia({clipInfo2.path}) or {}
+        for _, item in ipairs(items) do
+            table.insert(importedClips, item)
+        end
     end
 
     local totalImported = #importedImages + #importedClips

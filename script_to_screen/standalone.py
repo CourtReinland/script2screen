@@ -192,6 +192,7 @@ def generate_audio_standalone(
     project_slug: str,
     character_name: str = "Unknown",
     server_url: str = "",
+    shot_key: str = "",
 ) -> dict:
     """Generate TTS audio. Returns {status, file_path}."""
     try:
@@ -201,8 +202,11 @@ def generate_audio_standalone(
 
         audio_dir = ensure_dir(os.path.join(output_dir, "audio"))
         uid = uuid.uuid4().hex[:8]
-        safe_char = sanitize_filename(character_name)
-        filename = f"tts_{safe_char}_{uid}.wav"
+        if shot_key:
+            filename = f"{shot_key}_{uid}.wav"
+        else:
+            safe_char = sanitize_filename(character_name)
+            filename = f"tts_{safe_char}_{uid}.wav"
         save_path = os.path.join(audio_dir, filename)
 
         actual_path = provider.generate_speech(voice_id, text, save_path)

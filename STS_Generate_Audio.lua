@@ -18,6 +18,76 @@ local config = STS_loadConfig()
 local projectSlug, projectName = STS_getResolveProjectSlug()
 local outputDir = STS_getOutputDir(projectSlug)
 
+-- ============================================================
+-- DETECT CURRENT CLIP AND PRE-POPULATE DIALOGUE
+-- ============================================================
+
+local clipInfo = STS_getSelectedMediaPoolClip()
+if not clipInfo or clipInfo.status ~= "ok" or (clipInfo.comments or "") == "" then
+    clipInfo = STS_getCurrentTimelineItem()
+end
+
+local prefillText = ""
+local prefillShotKey = ""
+
+if clipInfo and clipInfo.status == "ok" then
+    local clipName = clipInfo.name or ""
+    local stsFilename = STS_extractFilename(clipInfo.comments or "")
+
+    -- Extract shot key from filename
+    local shotKeyFromName = clipName:match("^(s%d+_sh%d+)")
+    if not shotKeyFromName and stsFilename then
+        shotKeyFromName = stsFilename:match("^(s%d+_sh%d+)")
+    end
+    if shotKeyFromName then
+        prefillShotKey = shotKeyFromName
+    end
+
+    -- Look up dialogue for this shot from the screenplay
+    if prefillShotKey ~= "" then
+        local dialogueResult = STS_runPython(
+            'import os, traceback\n'
+            .. 'try:\n'
+            .. '    import json as j2\n'
+            .. '    cfg_path = os.path.expanduser("~/Library/Application Support/ScriptToScreen/config.json")\n'
+            .. '    sp = ""\n'
+            .. '    if os.path.isfile(cfg_path):\n'
+            .. '        with open(cfg_path) as cf: cc = j2.load(cf)\n'
+            .. '        sp = cc.get("lastScriptPath", "")\n'
+            .. '    if not sp or not os.path.isfile(sp):\n'
+            .. '        sp = ""\n'
+            .. '    shot_key = "' .. prefillShotKey .. '"\n'
+            .. '    parts = shot_key.split("_sh")\n'
+            .. '    si = int(parts[0][1:])\n'
+            .. '    shi = int(parts[1])\n'
+            .. '    lines = []\n'
+            .. '    if sp and os.path.isfile(sp):\n'
+            .. '        if sp.lower().endswith(".pdf"):\n'
+            .. '            from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+            .. '            screenplay = parse_pdf(sp)\n'
+            .. '        else:\n'
+            .. '            from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+            .. '            screenplay = parse_fountain(sp)\n'
+            .. '        for scene in screenplay.scenes:\n'
+            .. '            if scene.index == si:\n'
+            .. '                for dl in scene.dialogue:\n'
+            .. '                    if dl.shot_index == shi:\n'
+            .. '                        lines.append(f"{dl.character}: \\"{dl.text}\\"")\n'
+            .. '                break\n'
+            .. '    print(json.dumps({"status":"ok", "dialogue": "\\n".join(lines)}))\n'
+            .. 'except Exception as e:\n'
+            .. '    print(json.dumps({"status":"error", "error": str(e)}))\n'
+        )
+        local jStr = dialogueResult and dialogueResult:match("(%{.+%})")
+        if jStr then
+            local dData = STS_JSON.decode(jStr)
+            if dData and dData.status == "ok" and dData.dialogue and dData.dialogue ~= "" then
+                prefillText = dData.dialogue
+            end
+        end
+    end
+end
+
 -- Load saved voices from manifest
 local savedVoices = {}
 local voiceNames = {}
@@ -52,7 +122,7 @@ local win = disp:AddWindow({
     ui:VGroup{
         ui:Label{Text = "<h3>Generate Audio (TTS)</h3>", Alignment = {AlignHCenter = true}},
         ui:Label{Text = "Text to speak:"},
-        ui:TextEdit{ID = "TextEdit", PlainText = "", MinimumSize = {100, 100}},
+        ui:TextEdit{ID = "TextEdit", PlainText = prefillText, MinimumSize = {100, 100}},
         ui:HGroup{
             ui:Label{Text = "Voice:", Weight = 0.15},
             ui:ComboBox{ID = "VoiceCombo", Weight = 0.75},
@@ -254,6 +324,7 @@ function win.On.Generate.Clicked(ev)
         .. '        project_slug="' .. projectSlug .. '",\n'
         .. '        character_name="' .. selectedVoiceName:gsub('"', '\\"') .. '",\n'
         .. '        server_url="' .. (serverUrl or ""):gsub('"', '\\"') .. '",\n'
+        .. '        shot_key="' .. (prefillShotKey or ""):gsub('"', '\\"') .. '",\n'
         .. '    )\n'
         .. '    print(json.dumps(result))\n'
         .. 'except Exception as e:\n'

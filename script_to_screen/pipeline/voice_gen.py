@@ -2,6 +2,7 @@
 
 import logging
 import os
+import uuid
 from typing import Optional, Callable
 
 from ..api.providers import VoiceProvider
@@ -88,16 +89,16 @@ def generate_dialogue_audio(
 
     audio_dir = ensure_dir(os.path.join(output_dir, "dialogue_audio"))
 
-    all_dialogue: list[tuple[str, DialogueLine]] = []
+    all_dialogue: list[tuple[str, DialogueLine, int]] = []
     for scene in screenplay.scenes:
         for d_idx, dl in enumerate(scene.dialogue):
             dialogue_key = f"s{scene.index}_d{d_idx}"
-            all_dialogue.append((dialogue_key, dl))
+            all_dialogue.append((dialogue_key, dl, scene.index))
 
     tracker = ProgressTracker(len(all_dialogue), progress_callback)
     results: dict[str, str] = {}
 
-    for dialogue_key, dl in all_dialogue:
+    for dialogue_key, dl, scene_index in all_dialogue:
         char = screenplay.characters.get(dl.character)
         if not char or not char.voice_id:
             logger.warning(f"No voice for {dl.character}, skipping {dialogue_key}")
@@ -107,7 +108,9 @@ def generate_dialogue_audio(
         logger.info(f"Generating audio {dialogue_key}: {dl.character} says '{dl.text[:40]}...'")
 
         try:
-            save_path = os.path.join(audio_dir, f"{dialogue_key}_{sanitize_filename(dl.character)}.wav")
+            uid = uuid.uuid4().hex[:8]
+            shot_idx = getattr(dl, 'shot_index', 0)
+            save_path = os.path.join(audio_dir, f"s{scene_index}_sh{shot_idx}_{uid}.wav")
 
             actual_path = provider.generate_speech(
                 voice_id=char.voice_id,

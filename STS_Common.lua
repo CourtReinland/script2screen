@@ -228,6 +228,8 @@ function STS_loadConfig()
             config.model = saved.model or config.model
             config.aspectRatio = saved.aspectRatio or config.aspectRatio
             config.detailing = saved.detailing or config.detailing
+            config.episodeNumber = saved.episodeNumber or ""
+            config.episodeTitle = saved.episodeTitle or ""
             if saved.providers then
                 for pid, pdata in pairs(saved.providers) do
                     if config.providers[pid] then
@@ -376,33 +378,64 @@ function STS_extractFilename(comments)
     return filename
 end
 
+-- Build episode prefix from saved config
+function STS_buildEpisodePrefix()
+    local config = STS_loadConfig()
+    local num = config.episodeNumber or ""
+    local title = config.episodeTitle or ""
+    if num == "" and title == "" then return "" end
+    local sanitizedTitle = (title or ""):gsub("[^%w]", "")
+    if num ~= "" and sanitizedTitle ~= "" then
+        return "Ep" .. num .. "-" .. sanitizedTitle
+    elseif num ~= "" then
+        return "Ep" .. num
+    else
+        return sanitizedTitle
+    end
+end
+
 -- Import a single file to the media pool and tag it with STS metadata
+-- Uses scene-based bin structure: ScriptToScreen/{episodePrefix}/S{N}/{targetBinName}
 function STS_importAndTag(filePath, targetBinName)
+    local basename = filePath:match("([^/]+)$") or ""
+    local shotKey = basename:match("^(s%d+_sh%d+)") or ""
+    local epPrefix = STS_buildEpisodePrefix()
+    local sceneNum = ""
+    if shotKey ~= "" then
+        sceneNum = shotKey:match("^s(%d+)") or ""
+    end
+
+    local safeFilePath = filePath:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeEpPrefix = epPrefix:gsub('"', '\\"')
+    local safeBinName = (targetBinName or ""):gsub('"', '\\"')
+
     local result = STS_runPython(
         'try:\n'
-        .. '    import os\n'
+        .. '    import os, re\n'
         .. '    import DaVinciResolveScript as dvr\n'
         .. '    resolve = dvr.scriptapp("Resolve")\n'
         .. '    proj = resolve.GetProjectManager().GetCurrentProject()\n'
         .. '    mp = proj.GetMediaPool()\n'
         .. '    root = mp.GetRootFolder()\n'
-        .. '    # Find or create ScriptToScreen bin\n'
-        .. '    sts_bin = None\n'
-        .. '    for f in (root.GetSubFolders() or {}).values():\n'
-        .. '        if f.GetName() == "ScriptToScreen": sts_bin = f; break\n'
-        .. '    if not sts_bin: sts_bin = mp.AddSubFolder(root, "ScriptToScreen")\n'
-        .. '    # Find or create target sub-bin\n'
-        .. '    target_bin = sts_bin\n'
-        .. '    bin_name = "' .. (targetBinName or "") .. '"\n'
+        .. '    def find_or_create(parent, name):\n'
+        .. '        for f in (parent.GetSubFolders() or {}).values():\n'
+        .. '            if f.GetName() == name: return f\n'
+        .. '        return mp.AddSubFolder(parent, name)\n'
+        .. '    sts_bin = find_or_create(root, "ScriptToScreen")\n'
+        .. '    target = sts_bin\n'
+        .. '    ep_prefix = "' .. safeEpPrefix .. '"\n'
+        .. '    scene_num = "' .. sceneNum .. '"\n'
+        .. '    bin_name = "' .. safeBinName .. '"\n'
+        .. '    if ep_prefix:\n'
+        .. '        target = find_or_create(target, ep_prefix)\n'
+        .. '    if scene_num:\n'
+        .. '        target = find_or_create(target, "S" + scene_num)\n'
         .. '    if bin_name:\n'
-        .. '        for f in (sts_bin.GetSubFolders() or {}).values():\n'
-        .. '            if f.GetName() == bin_name: target_bin = f; break\n'
-        .. '        else:\n'
-        .. '            target_bin = mp.AddSubFolder(sts_bin, bin_name) or sts_bin\n'
-        .. '    mp.SetCurrentFolder(target_bin)\n'
-        .. '    items = mp.ImportMedia(["' .. filePath:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"])\n'
+        .. '        target = find_or_create(target, bin_name)\n'
+        .. '    mp.SetCurrentFolder(target)\n'
+        .. '    items = mp.ImportMedia(["' .. safeFilePath .. '"])\n'
         .. '    if items and len(items) > 0:\n'
-        .. '        filename = os.path.basename("' .. filePath:gsub("\\", "\\\\"):gsub('"', '\\"') .. '")\n'
+        .. '        filename = os.path.basename("' .. safeFilePath .. '")\n'
         .. '        items[0].SetMetadata("Comments", "STS:" + filename)\n'
         .. '        print(json.dumps({"status":"ok", "name": items[0].GetName()}))\n'
         .. '    else:\n'
