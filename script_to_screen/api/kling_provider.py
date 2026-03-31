@@ -4,10 +4,48 @@ import logging
 import os
 from typing import Optional
 
+import requests as http_requests
+
 from .providers import LipsyncProvider
 from .kling_client import KlingClient
 
 logger = logging.getLogger("ScriptToScreen")
+
+# Temporary file hosting for uploading local files to get public URLs.
+# Kling's API requires video as a URL — it doesn't accept base64 for video.
+# tmpfiles.org provides free anonymous hosting with auto-deletion.
+_TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
+
+
+def _upload_to_tmpfiles(file_path: str) -> str:
+    """Upload a local file to tmpfiles.org and return a direct download URL.
+
+    Files are automatically deleted after ~1 hour. No account needed.
+    This is used to give Kling a public URL for local video/audio files.
+    """
+    file_size = os.path.getsize(file_path)
+    if file_size > 100 * 1024 * 1024:  # 100MB limit
+        raise ValueError(f"File too large for upload ({file_size / 1024 / 1024:.0f}MB, max 100MB)")
+
+    logger.info(f"[Kling] Uploading {os.path.basename(file_path)} ({file_size / 1024 / 1024:.1f}MB)...")
+
+    with open(file_path, "rb") as f:
+        r = http_requests.post(
+            _TMPFILES_UPLOAD_URL,
+            files={"file": (os.path.basename(file_path), f)},
+            timeout=120,
+        )
+    r.raise_for_status()
+    data = r.json()
+
+    if data.get("status") != "success":
+        raise RuntimeError(f"Upload failed: {data}")
+
+    # Convert to direct download URL (add /dl/ prefix)
+    url = data["data"]["url"]
+    dl_url = url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+    logger.info(f"[Kling] Uploaded → {dl_url}")
+    return dl_url
 
 
 class KlingLipsyncProvider(LipsyncProvider):
@@ -15,16 +53,16 @@ class KlingLipsyncProvider(LipsyncProvider):
 
     Requires access_key and secret_key from https://klingai.com.
     Uses JWT (HS256) authentication — NOT the same as Freepik's API key.
+
+    Local video/audio files are automatically uploaded to a temporary
+    file host (tmpfiles.org) to get public URLs that Kling can access.
     """
 
     def __init__(self, api_key: str = "", server_url: str = "", **kwargs):
-        # api_key format: "access_key:secret_key" (colon-separated)
-        # or passed separately via kwargs
         access_key = kwargs.get("access_key", "")
         secret_key = kwargs.get("secret_key", "")
 
         if not access_key and ":" in api_key:
-            # Parse "access_key:secret_key" format
             parts = api_key.split(":", 1)
             access_key = parts[0]
             secret_key = parts[1]
@@ -50,21 +88,16 @@ class KlingLipsyncProvider(LipsyncProvider):
         """Submit a lip sync task. Returns task_id for polling.
 
         Both video and audio can be local file paths or URLs.
-        Local files are converted to base64 (audio) or need to be
-        accessible via URL (video — Kling requires a URL for video).
+        Local video files are uploaded to tmpfiles.org to get a public URL.
+        Local audio files can be sent as base64 (preferred) or uploaded.
         """
         # Handle video source
         video_url = None
         if video_path_or_url.startswith("http"):
             video_url = video_path_or_url
         elif os.path.isfile(video_path_or_url):
-            # Kling requires a video URL, not base64
-            # For local files, we'd need to upload somewhere first
-            # For now, raise an error — the user should provide a URL
-            raise ValueError(
-                f"Kling lip sync requires a video URL, not a local file. "
-                f"Please upload {os.path.basename(video_path_or_url)} to a public URL first."
-            )
+            # Upload local video to get a public URL
+            video_url = _upload_to_tmpfiles(video_path_or_url)
         else:
             raise FileNotFoundError(f"Video not found: {video_path_or_url}")
 
@@ -74,15 +107,14 @@ class KlingLipsyncProvider(LipsyncProvider):
         if audio_path_or_url.startswith("http"):
             audio_url = audio_path_or_url
         elif os.path.isfile(audio_path_or_url):
-            # Kling accepts base64-encoded audio files (max 5MB)
             file_size = os.path.getsize(audio_path_or_url)
-            if file_size > 5 * 1024 * 1024:
-                raise ValueError(
-                    f"Audio file too large ({file_size / 1024 / 1024:.1f}MB). "
-                    f"Kling accepts max 5MB for base64 audio."
-                )
-            audio_b64 = KlingClient.audio_to_base64(audio_path_or_url)
-            logger.info(f"[Kling] Encoded audio: {os.path.basename(audio_path_or_url)} ({file_size} bytes)")
+            if file_size <= 5 * 1024 * 1024:
+                # Small enough for base64 (preferred — no upload needed)
+                audio_b64 = KlingClient.audio_to_base64(audio_path_or_url)
+                logger.info(f"[Kling] Audio as base64: {os.path.basename(audio_path_or_url)}")
+            else:
+                # Too large for base64 — upload instead
+                audio_url = _upload_to_tmpfiles(audio_path_or_url)
         else:
             raise FileNotFoundError(f"Audio not found: {audio_path_or_url}")
 
