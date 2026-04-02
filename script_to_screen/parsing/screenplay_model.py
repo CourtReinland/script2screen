@@ -74,6 +74,7 @@ class Screenplay:
     title: str = "Untitled"
     scenes: list[Scene] = field(default_factory=list)
     characters: dict[str, Character] = field(default_factory=dict)
+    raw_pages: list[str] = field(default_factory=list)
 
     @property
     def scene_count(self) -> int:

@@ -253,6 +253,10 @@ def parse_pdf(pdf_path: str) -> Screenplay:
 
         # ---- Page-by-page parsing ----
         for page in pdf.pages:
+            # Extract full page text for raw_pages
+            page_text = page.extract_text() or ""
+            screenplay.raw_pages.append(page_text)
+
             page_lines = _extract_lines(page)
 
             for line_info in page_lines:

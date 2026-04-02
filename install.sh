@@ -46,7 +46,7 @@ fi
 EDIT_SCRIPTS="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
 echo "Installing standalone tools to $EDIT_SCRIPTS..."
 sudo mkdir -p "$EDIT_SCRIPTS"
-for script in STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua; do
+for script in STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua; do
     if [ -f "$SCRIPT_DIR/$script" ]; then
         sudo cp "$SCRIPT_DIR/$script" "$EDIT_SCRIPTS/"
         sudo chown "$(whoami):staff" "$EDIT_SCRIPTS/$script"
