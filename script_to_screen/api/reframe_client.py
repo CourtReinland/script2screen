@@ -1,7 +1,10 @@
 """Reframe shot client using HuggingFace Spaces Gradio API.
 
-Calls the Qwen-Image-Edit space to generate camera angle variations
-of an existing image using Chinese camera commands.
+Calls the Qwen-Image-Edit-2509 + Multiple-angles LoRA space to generate
+camera angle variations of an existing image.
+
+The API uses azimuth (horizontal rotation), elevation (vertical angle),
+and distance (zoom) parameters — NOT text prompts.
 """
 
 import os
@@ -9,16 +12,23 @@ import shutil
 import time
 from typing import Optional
 
+# Angle presets mapped to (azimuth, elevation, distance) tuples
+# azimuth: 0-315 degrees horizontal rotation
+# elevation: -30 to 60 degrees vertical angle
+# distance: 0.6-1.4 (1.0 = normal, <1 = closer, >1 = farther)
 ANGLE_PRESETS = {
-    "Front View": "保持正面视角",
-    "Left Side (45\u00b0)": "将镜头向左旋转45度",
-    "Right Side (45\u00b0)": "将镜头向右旋转45度",
-    "Top Down": "将镜头转为俯视",
-    "Low Angle": "将镜头向下移动",
-    "Wide Angle": "将镜头转为广角镜头",
-    "Close Up": "将镜头转为特写镜头",
-    "Back View": "将镜头向左旋转180度",
-    "Move Forward": "将镜头向前移动",
+    "Front View":        (0,    0,   1.0),
+    "Left Side (45°)":   (315,  0,   1.0),   # 315 = -45 = left
+    "Right Side (45°)":  (45,   0,   1.0),
+    "Left Side (90°)":   (270,  0,   1.0),
+    "Right Side (90°)":  (90,   0,   1.0),
+    "Back View":         (180,  0,   1.0),
+    "Top Down":          (0,    60,  1.0),
+    "Low Angle":         (0,   -30,  1.0),
+    "Wide Angle":        (0,    0,   1.4),   # pull back
+    "Close Up":          (0,    0,   0.6),   # push in
+    "3/4 Left High":     (315,  30,  1.0),
+    "3/4 Right High":    (45,   30,  1.0),
 }
 
 SPACE_ID = "multimodalart/qwen-image-multiple-angles-3d-camera"
@@ -27,35 +37,38 @@ SPACE_ID = "multimodalart/qwen-image-multiple-angles-3d-camera"
 def reframe_image(
     image_path: str,
     angle_preset: Optional[str] = None,
-    custom_prompt: Optional[str] = None,
+    azimuth: float = 0,
+    elevation: float = 0,
+    distance: float = 1.0,
     output_dir: Optional[str] = None,
     shot_key: str = "",
+    seed: int = 0,
+    randomize_seed: bool = True,
+    guidance_scale: float = 1.0,
+    num_inference_steps: int = 4,
 ) -> dict:
-    """Reframe an image using a camera angle preset or custom prompt.
+    """Reframe an image using camera angle parameters.
 
     Args:
         image_path: Path to the source image.
-        angle_preset: One of the keys from ANGLE_PRESETS (e.g. "Left Side (45)").
-        custom_prompt: Free-form camera instruction (Chinese or English).
-            If both angle_preset and custom_prompt are given, custom_prompt wins.
-        output_dir: Directory to save the result image. Defaults to same dir as source.
-        shot_key: Shot key for naming the output file (e.g. "s1_sh1").
+        angle_preset: One of ANGLE_PRESETS keys (overrides azimuth/elevation/distance).
+        azimuth: Horizontal rotation 0-315 degrees.
+        elevation: Vertical angle -30 to 60 degrees.
+        distance: Zoom level 0.6-1.4 (1.0 = normal).
+        output_dir: Directory to save result.
+        shot_key: Shot key for naming output file.
 
     Returns:
         dict with keys: status, file_path, filename, angle
     """
     from gradio_client import Client, handle_file
 
-    # Determine the camera prompt
-    if custom_prompt and custom_prompt.strip():
-        camera_prompt = custom_prompt.strip()
-    elif angle_preset and angle_preset in ANGLE_PRESETS:
-        camera_prompt = ANGLE_PRESETS[angle_preset]
-    else:
-        camera_prompt = ANGLE_PRESETS["Front View"]
-
     if not os.path.isfile(image_path):
         return {"status": "error", "error": f"Image not found: {image_path}"}
+
+    # Apply preset if specified
+    if angle_preset and angle_preset in ANGLE_PRESETS:
+        azimuth, elevation, distance = ANGLE_PRESETS[angle_preset]
 
     if output_dir is None:
         output_dir = os.path.dirname(image_path)
@@ -64,20 +77,38 @@ def reframe_image(
     try:
         client = Client(SPACE_ID)
         result = client.predict(
-            input_image=handle_file(image_path),
-            prompt=camera_prompt,
-            api_name="/predict",
+            image=handle_file(image_path),
+            azimuth=azimuth,
+            elevation=elevation,
+            distance=distance,
+            seed=seed,
+            randomize_seed=randomize_seed,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            height=1024,
+            width=1024,
+            api_name="/infer_camera_edit",
         )
     except Exception as e:
         return {"status": "error", "error": f"Gradio API call failed: {e}"}
 
-    # result is the path to the generated image file
-    result_path = str(result)
-    if not os.path.isfile(result_path):
+    # result is a tuple: (output_image_dict, seed, generated_prompt)
+    if isinstance(result, (list, tuple)) and len(result) >= 1:
+        output_info = result[0]
+        if isinstance(output_info, dict):
+            result_path = output_info.get("path", "")
+        elif isinstance(output_info, str):
+            result_path = output_info
+        else:
+            result_path = str(output_info)
+    else:
+        result_path = str(result)
+
+    if not result_path or not os.path.isfile(result_path):
         return {"status": "error", "error": f"Result file not found: {result_path}"}
 
     # Build output filename
-    angle_tag = (angle_preset or "custom").replace(" ", "_").replace("(", "").replace(")", "").replace("°", "")
+    angle_tag = (angle_preset or f"az{int(azimuth)}_el{int(elevation)}").replace(" ", "_").replace("(", "").replace(")", "").replace("°", "")
     timestamp = int(time.time())
     if shot_key:
         filename = f"{shot_key}_reframe_{angle_tag}_{timestamp}.png"
@@ -92,6 +123,5 @@ def reframe_image(
         "status": "ok",
         "file_path": dest_path,
         "filename": filename,
-        "angle": angle_preset or "custom",
-        "prompt_used": camera_prompt,
+        "angle": angle_preset or f"azimuth={azimuth}, elevation={elevation}, distance={distance}",
     }

@@ -154,12 +154,10 @@ function win.On.Generate.Clicked(ev)
 
     local angleIdx = itm.AnglePreset.CurrentIndex + 1
     local anglePreset = anglePresets[angleIdx] or "Front View"
-    local customPrompt = itm.CustomPrompt.PlainText or ""
     local shotKey = itm.ShotKey.Text or ""
 
     local safeImagePath = imagePath:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeOutput = (outputDir .. "/images"):gsub("\\", "\\\\"):gsub('"', '\\"')
-    local safeCustomPrompt = customPrompt:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " ")
 
     local code = 'import traceback\n'
         .. 'try:\n'
@@ -167,7 +165,6 @@ function win.On.Generate.Clicked(ev)
         .. '    result = reframe_image(\n'
         .. '        image_path="' .. safeImagePath .. '",\n'
         .. '        angle_preset=' .. STS_JSON.encode(anglePreset) .. ',\n'
-        .. '        custom_prompt="' .. safeCustomPrompt .. '",\n'
         .. '        output_dir="' .. safeOutput .. '",\n'
         .. '        shot_key="' .. (shotKey or ""):gsub('"', '\\"') .. '",\n'
         .. '    )\n'
