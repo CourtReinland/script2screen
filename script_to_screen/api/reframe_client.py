@@ -111,13 +111,30 @@ def reframe_image(
     angle_tag = (angle_preset or f"az{int(azimuth)}_el{int(elevation)}").replace(" ", "_").replace("(", "").replace(")", "").replace("°", "")
     timestamp = int(time.time())
     if shot_key:
-        filename = f"{shot_key}_reframe_{angle_tag}_{timestamp}.png"
+        filename = f"{shot_key}_reframe_{angle_tag}_{timestamp}.jpg"
     else:
         basename = os.path.splitext(os.path.basename(image_path))[0]
-        filename = f"{basename}_reframe_{angle_tag}_{timestamp}.png"
+        filename = f"{basename}_reframe_{angle_tag}_{timestamp}.jpg"
 
     dest_path = os.path.join(output_dir, filename)
-    shutil.copy2(result_path, dest_path)
+
+    # The Gradio API often returns WebP images regardless of extension.
+    # DaVinci Resolve doesn't support WebP, so convert to JPEG.
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(result_path)
+        img = img.convert("RGB")  # Ensure RGB for JPEG
+        img.save(dest_path, "JPEG", quality=95)
+    except ImportError:
+        # PIL not available — try ffmpeg as fallback
+        import subprocess
+        ret = subprocess.run(
+            ["ffmpeg", "-y", "-i", result_path, dest_path],
+            capture_output=True, timeout=30,
+        )
+        if ret.returncode != 0:
+            # Last resort: just copy and hope Resolve handles it
+            shutil.copy2(result_path, dest_path)
 
     return {
         "status": "ok",
