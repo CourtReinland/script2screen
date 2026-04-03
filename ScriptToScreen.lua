@@ -1566,48 +1566,50 @@ function win.On.GenAllImages.Clicked(ev)
             local totalShots = data.total_shots or 0
             local errs = data.errors or {}
             if count > 0 then
-                -- Import generated images to Resolve media pool immediately
+                -- Import generated images to Resolve media pool (episode/scene bins)
                 local importMsg = ""
                 local importOk, importErr = pcall(function()
                     local project = resolve:GetProjectManager():GetCurrentProject()
                     if project then
                         local mp = project:GetMediaPool()
                         local rootF = mp:GetRootFolder()
-                        -- Find or create ScriptToScreen/Images bin
+                        -- Find or create ScriptToScreen bin
                         local stsBin2 = nil
                         for _, folder in pairs(rootF:GetSubFolders() or {}) do
                             if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
                         end
                         if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
-                        local imgBin2 = nil
-                        if stsBin2 then
-                            for _, folder in pairs(stsBin2:GetSubFolders() or {}) do
-                                if folder:GetName() == "Images" then imgBin2 = folder; break end
+                        -- Helper to find or create a sub-bin
+                        local function findOrCreate(parent, name)
+                            if not parent then return nil end
+                            for _, f in pairs(parent:GetSubFolders() or {}) do
+                                if f:GetName() == name then return f end
                             end
-                            if not imgBin2 then imgBin2 = mp:AddSubFolder(stsBin2, "Images") end
+                            return mp:AddSubFolder(parent, name)
                         end
-                        if imgBin2 then mp:SetCurrentFolder(imgBin2) end
-                        -- Collect image files to import
-                        local imgFilesToImport = {}
-                        for _, imgPath in pairs(generatedImages) do
+                        -- Import one-at-a-time, routing to episode/scene bins
+                        local epPfx = buildEpisodePrefix()
+                        local importCount = 0
+                        for shotKey, imgPath in pairs(generatedImages) do
                             if type(imgPath) == "string" then
-                                table.insert(imgFilesToImport, imgPath)
-                            end
-                        end
-                        -- Import one-at-a-time to prevent Resolve image-sequence detection
-                        if #imgFilesToImport > 0 then
-                            local importCount = 0
-                            for _, singlePath in ipairs(imgFilesToImport) do
-                                local items = mp:ImportMedia({singlePath}) or {}
-                                -- Tag each imported clip with STS metadata for lookup
+                                -- Build bin path: ScriptToScreen/{epPrefix}/S{N}/Images
+                                local targetBin = stsBin2
+                                if epPfx ~= "" then
+                                    targetBin = findOrCreate(targetBin, epPfx)
+                                end
+                                local sNum = tonumber((shotKey or ""):match("^s(%d+)")) or 0
+                                targetBin = findOrCreate(targetBin, "S" .. tostring(sNum))
+                                targetBin = findOrCreate(targetBin, "Images")
+                                if targetBin then mp:SetCurrentFolder(targetBin) end
+                                local items = mp:ImportMedia({imgPath}) or {}
                                 for _, item in ipairs(items) do
-                                    local basename = singlePath:match("([^/]+)$") or ""
+                                    local basename = imgPath:match("([^/]+)$") or ""
                                     pcall(function() item:SetMetadata("Comments", "STS:" .. basename) end)
                                 end
                                 importCount = importCount + #items
                             end
-                            importMsg = " (" .. tostring(importCount) .. " added to bin)"
                         end
+                        importMsg = " (" .. tostring(importCount) .. " added to bin)"
                     end
                 end)
                 if not importOk then
@@ -1801,31 +1803,37 @@ function win.On.GenAllVideos.Clicked(ev)
             local errs = data.errors or {}
             local imgCount = data.image_count or 0
             if count > 0 then
-                -- Import generated videos to ScriptToScreen/Videos bin
+                -- Import generated videos to episode/scene bins
                 local importMsg = ""
                 local importOk, importErr = pcall(function()
                     local project = resolve:GetProjectManager():GetCurrentProject()
                     if project then
                         local mp = project:GetMediaPool()
                         local rootF = mp:GetRootFolder()
-                        -- Find or create ScriptToScreen/Videos bin
                         local stsBin2 = nil
                         for _, folder in pairs(rootF:GetSubFolders() or {}) do
                             if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
                         end
                         if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
-                        local vidBin = nil
-                        if stsBin2 then
-                            for _, folder in pairs(stsBin2:GetSubFolders() or {}) do
-                                if folder:GetName() == "Videos" then vidBin = folder; break end
+                        local function findOrCreate(parent, name)
+                            if not parent then return nil end
+                            for _, f in pairs(parent:GetSubFolders() or {}) do
+                                if f:GetName() == name then return f end
                             end
-                            if not vidBin then vidBin = mp:AddSubFolder(stsBin2, "Videos") end
+                            return mp:AddSubFolder(parent, name)
                         end
-                        if vidBin then mp:SetCurrentFolder(vidBin) end
-                        -- Import each video and tag with STS metadata
+                        local epPfx = buildEpisodePrefix()
                         local importCount = 0
-                        for _, vidPath in pairs(generatedVideos) do
+                        for shotKey, vidPath in pairs(generatedVideos) do
                             if type(vidPath) == "string" then
+                                local targetBin = stsBin2
+                                if epPfx ~= "" then
+                                    targetBin = findOrCreate(targetBin, epPfx)
+                                end
+                                local sNum = tonumber((shotKey or ""):match("^s(%d+)")) or 0
+                                targetBin = findOrCreate(targetBin, "S" .. tostring(sNum))
+                                targetBin = findOrCreate(targetBin, "Videos")
+                                if targetBin then mp:SetCurrentFolder(targetBin) end
                                 local items = mp:ImportMedia({vidPath}) or {}
                                 for _, item in ipairs(items) do
                                     local basename = vidPath:match("([^/]+)$") or ""
