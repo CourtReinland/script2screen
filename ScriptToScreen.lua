@@ -2095,7 +2095,13 @@ function win.On.SyncAll.Clicked(ev)
         .. '        m = re.match(r"(s\\d+_sh\\d+)", bn)\n'
         .. '        return m.group(1) if m else bn\n'
         .. '    videos = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))\n'
-        .. '    audios = sorted(glob.glob(os.path.join(audio_dir, "*.mp3")) + glob.glob(os.path.join(audio_dir, "*.wav")))\n'
+        .. '    # Search both audio/ and audio/dialogue_audio/ for audio files\n'
+        .. '    audios = sorted(\n'
+        .. '        glob.glob(os.path.join(audio_dir, "*.wav")) +\n'
+        .. '        glob.glob(os.path.join(audio_dir, "*.mp3")) +\n'
+        .. '        glob.glob(os.path.join(audio_dir, "dialogue_audio", "*.wav")) +\n'
+        .. '        glob.glob(os.path.join(audio_dir, "dialogue_audio", "*.mp3"))\n'
+        .. '    )\n'
         .. '    video_paths = {_shot_key(v): v for v in videos}\n'
         .. '    audio_paths = {_shot_key(a): a for a in audios}\n'
         .. '    screenplay = Screenplay(title="lipsync")\n'
@@ -2237,17 +2243,21 @@ function win.On.AssembleBtn.Clicked(ev)
         end
     end
 
-    -- Import videos and audio to main ScriptToScreen bin
-    local allClipFiles = {}
-    for _, f in ipairs(videoFiles) do table.insert(allClipFiles, f) end
-    for _, f in ipairs(audioFiles) do table.insert(allClipFiles, f) end
-
-    local importedClips = {}
-    if #allClipFiles > 0 then
-        importedClips = mediaPool:ImportMedia(allClipFiles) or {}
+    -- Import videos to ScriptToScreen bin (separate from audio)
+    local importedVideoClips = {}
+    if #videoFiles > 0 then
+        importedVideoClips = mediaPool:ImportMedia(videoFiles) or {}
     end
 
-    local totalImported = #importedImages + #importedClips
+    -- Import audio to ScriptToScreen bin
+    local importedAudioClips = {}
+    if #audioFiles > 0 then
+        importedAudioClips = mediaPool:ImportMedia(audioFiles) or {}
+    end
+
+    local totalImported = #importedImages + #importedVideoClips + #importedAudioClips
+    -- For timeline appending, use video clips only (audio added to audio track separately)
+    local importedClips = importedVideoClips
 
     -- Create timeline — use a unique name if the default already exists
     local actualTimelineName = timelineName
