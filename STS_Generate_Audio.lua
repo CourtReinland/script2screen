@@ -136,12 +136,15 @@ local win = disp:AddWindow({
             ui:Label{ID = "SamplePath", Text = "(none)", Weight = 0.2},
         },
         ui:HGroup{
-            ui:Button{ID = "CloneVoice", Text = "Clone Voice", Weight = 0.3},
-            ui:Label{Text = "", Weight = 0.7},
+            ui:Button{ID = "CloneVoice", Text = "Clone Voice", Weight = 0.25},
+            ui:Button{ID = "FetchCloudVoices", Text = "Fetch Cloud Voices", Weight = 0.3},
+            ui:Label{Text = "", Weight = 0.45},
         },
         ui:HGroup{
-            ui:Label{Text = "Provider:", Weight = 0.15},
-            ui:ComboBox{ID = "ProviderCombo", Weight = 0.85},
+            ui:Label{Text = "Provider:", Weight = 0.12},
+            ui:ComboBox{ID = "ProviderCombo", Weight = 0.45},
+            ui:Label{Text = "Model:", Weight = 0.08},
+            ui:ComboBox{ID = "TTSModelCombo", Weight = 0.35},
         },
         ui:VGap(5),
         ui:HGroup{
@@ -270,6 +273,84 @@ function win.On.CloneVoice.Clicked(ev)
         end
     else
         itm.StatusLabel.Text = "Failed — check console"
+        itm.StatusLabel.StyleSheet = "color: red;"
+    end
+end
+
+-- Fetch voices and models from ElevenLabs cloud
+function win.On.FetchCloudVoices.Clicked(ev)
+    local providerId = STS_getProviderIdFromCombo(itm.ProviderCombo, STS_voiceProviders)
+    if providerId ~= "elevenlabs" then
+        itm.StatusLabel.Text = "Cloud voices only for ElevenLabs"
+        itm.StatusLabel.StyleSheet = "color: orange;"
+        return
+    end
+    local apiKey = STS_getProviderApiKey(config, "elevenlabs")
+    if apiKey == "" then
+        itm.StatusLabel.Text = "No ElevenLabs API key set"
+        itm.StatusLabel.StyleSheet = "color: red;"
+        return
+    end
+
+    itm.StatusLabel.Text = "Fetching cloud voices..."
+    itm.StatusLabel.StyleSheet = "color: #888;"
+
+    local keyfile = os.tmpname()
+    local kf = io.open(keyfile, "w")
+    if kf then kf:write(apiKey); kf:close() end
+
+    local code = 'import json, traceback\n'
+        .. 'try:\n'
+        .. '    import requests\n'
+        .. '    key = open("' .. keyfile .. '").read().strip()\n'
+        .. '    r = requests.get("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": key}, timeout=15)\n'
+        .. '    r.raise_for_status()\n'
+        .. '    voices = [{"name": v["name"], "voice_id": v["voice_id"], "gender": v.get("labels",{}).get("gender","")} for v in r.json().get("voices", [])]\n'
+        .. '    r2 = requests.get("https://api.elevenlabs.io/v1/models", headers={"xi-api-key": key}, timeout=15)\n'
+        .. '    r2.raise_for_status()\n'
+        .. '    models = [{"id": m["model_id"], "name": m["name"]} for m in r2.json()]\n'
+        .. '    print(json.dumps({"status": "ok", "voices": voices, "models": models}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"status": "error", "error": str(e)}))\n'
+
+    local result = STS_runPython(code)
+    os.remove(keyfile)
+
+    local jsonStr = result and result:match("(%{.+%})")
+    if jsonStr then
+        local data = STS_JSON.decode(jsonStr)
+        if data and data.status == "ok" then
+            local cloudVoices = data.voices or {}
+            for _, v in ipairs(cloudVoices) do
+                local displayName = v.name
+                if v.gender ~= "" then displayName = displayName .. " (" .. v.gender .. ")" end
+                savedVoices[displayName] = {voice_id = v.voice_id}
+                table.insert(voiceNames, displayName)
+            end
+            table.sort(voiceNames)
+            populateVoiceCombo()
+
+            -- Populate TTS model combo
+            itm.TTSModelCombo:Clear()
+            local models = data.models or {}
+            for _, m in ipairs(models) do
+                itm.TTSModelCombo:AddItem(m.name .. " (" .. m.id .. ")")
+            end
+            for i, m in ipairs(models) do
+                if m.id == "eleven_multilingual_v2" then
+                    itm.TTSModelCombo.CurrentIndex = i - 1
+                    break
+                end
+            end
+
+            itm.StatusLabel.Text = "Loaded " .. tostring(#cloudVoices) .. " voices, " .. tostring(#models) .. " models"
+            itm.StatusLabel.StyleSheet = "color: green; font-weight: bold;"
+        else
+            itm.StatusLabel.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.StatusLabel.StyleSheet = "color: red;"
+        end
+    else
+        itm.StatusLabel.Text = "Failed to fetch"
         itm.StatusLabel.StyleSheet = "color: red;"
     end
 end
