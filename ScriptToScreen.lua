@@ -704,13 +704,18 @@ local win = disp:AddWindow({
             -- ========================
             ui:VGroup{
                 ID = "VoicePage",
-                ui:Label{Text = "<h3>Voice Setup</h3><p>Provide voice samples for each speaking character.</p>", Alignment = {AlignHCenter = true}},
-                ui:Tree{ID = "VoiceTree", HeaderHidden = false, MinimumSize = {500, 200}},
+                ui:Label{Text = "<h3>Voice Setup</h3><p>Assign voices to characters. Clone from samples or use cloud voices.</p>", Alignment = {AlignHCenter = true}},
+                ui:Tree{ID = "VoiceTree", HeaderHidden = false, MinimumSize = {500, 160}},
                 ui:HGroup{
-                    ui:Button{ID = "BrowseVoice", Text = "Add Voice Sample", Weight = 0.25},
+                    ui:Button{ID = "BrowseVoice", Text = "Add Sample", Weight = 0.2},
                     ui:Button{ID = "CloneVoice", Text = "Clone Voice", Weight = 0.2},
-                    ui:Button{ID = "TestVoice", Text = "Test", Weight = 0.15},
-                    ui:Label{Text = "", Weight = 0.4},
+                    ui:Button{ID = "FetchCloudVoices", Text = "Fetch Cloud Voices", Weight = 0.25},
+                    ui:Button{ID = "TestVoice", Text = "Test", Weight = 0.1},
+                    ui:Label{Text = "", Weight = 0.25},
+                },
+                ui:HGroup{
+                    ui:Label{Text = "TTS Model:", Weight = 0.12},
+                    ui:ComboBox{ID = "TTSModelCombo", Weight = 0.88},
                 },
                 ui:Label{ID = "VoiceProgress", Text = "Ready"},
                 ui:VGap(0, 0.5),
@@ -1879,6 +1884,85 @@ end
 -- ============================================================
 -- STEP 7: Voice Cloning
 -- ============================================================
+
+-- Fetch voices from ElevenLabs cloud account
+function win.On.FetchCloudVoices.Clicked(ev)
+    local voicePid = config.voiceProvider
+    if voicePid ~= "elevenlabs" then
+        itm.VoiceProgress.Text = "Select ElevenLabs as voice provider first (Step 1)"
+        itm.VoiceProgress.StyleSheet = "color: orange;"
+        return
+    end
+    local apiKey = config.providers.elevenlabs.apiKey or ""
+    if apiKey == "" then
+        itm.VoiceProgress.Text = "Set ElevenLabs API key first (Step 1)"
+        itm.VoiceProgress.StyleSheet = "color: red;"
+        return
+    end
+    itm.VoiceProgress.Text = "Fetching voices from ElevenLabs..."
+    itm.VoiceProgress.StyleSheet = "color: #888;"
+
+    local keyfile = os.tmpname()
+    local kf = io.open(keyfile, "w")
+    if kf then kf:write(apiKey); kf:close() end
+
+    local code = 'import json\n'
+        .. 'try:\n'
+        .. '    import requests\n'
+        .. '    key = open("' .. keyfile .. '").read().strip()\n'
+        .. '    r = requests.get("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": key}, timeout=15)\n'
+        .. '    r.raise_for_status()\n'
+        .. '    voices = [{"name": v["name"], "voice_id": v["voice_id"], "gender": v.get("labels",{}).get("gender","")} for v in r.json().get("voices", [])]\n'
+        .. '    r2 = requests.get("https://api.elevenlabs.io/v1/models", headers={"xi-api-key": key}, timeout=15)\n'
+        .. '    r2.raise_for_status()\n'
+        .. '    models = [{"id": m["model_id"], "name": m["name"]} for m in r2.json()]\n'
+        .. '    print(json.dumps({"status": "ok", "voices": voices, "models": models}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"status": "error", "error": str(e)}))\n'
+
+    local result = runPython(code)
+    os.remove(keyfile)
+
+    local jsonStr = result and result:match("(%{.+%})")
+    if jsonStr then
+        local data = JSON.decode(jsonStr)
+        if data and data.status == "ok" then
+            local cloudVoices = data.voices or {}
+            for _, v in ipairs(cloudVoices) do
+                local displayName = v.name
+                if v.gender and v.gender ~= "" then displayName = displayName .. " (" .. v.gender .. ")" end
+                -- Add to voice tree
+                local item = itm.VoiceTree:NewItem()
+                item.Text[0] = displayName
+                item.Text[1] = "cloud"
+                item.Text[2] = "(ElevenLabs)"
+                item.Text[3] = v.voice_id
+                itm.VoiceTree:AddTopLevelItem(item)
+                characterVoices[displayName] = v.voice_id
+            end
+            -- Populate TTS model combo
+            local models = data.models or {}
+            itm.TTSModelCombo:Clear()
+            for _, m in ipairs(models) do
+                itm.TTSModelCombo:AddItem(m.name .. " (" .. m.id .. ")")
+            end
+            for i, m in ipairs(models) do
+                if m.id == "eleven_multilingual_v2" then
+                    itm.TTSModelCombo.CurrentIndex = i - 1
+                    break
+                end
+            end
+            itm.VoiceProgress.Text = "Loaded " .. tostring(#cloudVoices) .. " voices, " .. tostring(#models) .. " models"
+            itm.VoiceProgress.StyleSheet = "color: green; font-weight: bold;"
+        else
+            itm.VoiceProgress.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.VoiceProgress.StyleSheet = "color: red;"
+        end
+    else
+        itm.VoiceProgress.Text = "Failed to fetch voices"
+        itm.VoiceProgress.StyleSheet = "color: red;"
+    end
+end
 
 function win.On.BrowseVoice.Clicked(ev)
     local selected = itm.VoiceTree:CurrentItem()
