@@ -1311,7 +1311,7 @@ function win.On.ParseScript.Clicked(ev)
         .. '            })\n'
         .. '        dialogue_list = []\n'
         .. '        for dl in scene.dialogue:\n'
-        .. '            dialogue_list.append({"character": dl.character, "text": dl.text, "parenthetical": dl.parenthetical or ""})\n'
+        .. '            dialogue_list.append({"character": dl.character, "text": dl.text, "shot_index": dl.shot_index, "parenthetical": dl.parenthetical or ""})\n'
         .. '        s = {\n'
         .. '            "index": scene.index,\n'
         .. '            "heading": scene.heading,\n'
@@ -1370,6 +1370,10 @@ function win.On.ParseScript.Clicked(ev)
                     end
                 end
                 itm.ScriptSummary.PlainText = summary
+
+                -- Save script path for standalone tools
+                config.lastScriptPath = itm.ScriptPath.Text
+                saveConfig()
 
                 -- Populate character tree for Step 3
                 populateCharacterTree(data)
@@ -2562,6 +2566,41 @@ local function populateVoiceTree()
     end
 end
 
+local function populateDialogueTree()
+    if not screenplayData or not screenplayData.scenes then return end
+
+    local hdr = itm.DialogueTree:NewItem()
+    hdr.Text[0] = "Scene"
+    hdr.Text[1] = "Shot"
+    hdr.Text[2] = "Character"
+    hdr.Text[3] = "Dialogue"
+    itm.DialogueTree:SetHeaderItem(hdr)
+    itm.DialogueTree.ColumnCount = 4
+    itm.DialogueTree.ColumnWidth[0] = 50
+    itm.DialogueTree.ColumnWidth[1] = 50
+    itm.DialogueTree.ColumnWidth[2] = 100
+    itm.DialogueTree.ColumnWidth[3] = 350
+
+    itm.DialogueTree:Clear()
+    for _, scene in ipairs(screenplayData.scenes) do
+        local dlLines = scene.dialogue_lines or scene.dialogue or {}
+        if type(dlLines) == "number" then
+            -- dialogue is just a count, not the actual lines
+        else
+            for _, dl in ipairs(dlLines) do
+                local item = itm.DialogueTree:NewItem()
+                item.Text[0] = tostring(scene.index or 0)
+                item.Text[1] = tostring(dl.shot_index or 0)
+                item.Text[2] = dl.character or ""
+                local text = dl.text or ""
+                if #text > 60 then text = text:sub(1, 57) .. "..." end
+                item.Text[3] = text
+                itm.DialogueTree:AddTopLevelItem(item)
+            end
+        end
+    end
+end
+
 -- Override onNext to populate trees when entering certain steps
 local _origOnNext = onNext
 onNext = function()
@@ -2572,6 +2611,8 @@ onNext = function()
         populateVideoTree()
     elseif nextStep == 7 then  -- Entering Voice Setup (Step 7)
         populateVoiceTree()
+    elseif nextStep == 8 then  -- Entering Dialogue Generation (Step 8)
+        populateDialogueTree()
     end
     _origOnNext()
 end

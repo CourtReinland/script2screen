@@ -192,6 +192,17 @@ class ElevenLabsClient:
                 logger.warning(f"Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
+            if resp.status_code == 401:
+                # ElevenLabs returns 401 for quota exceeded (misleading)
+                try:
+                    err_data = resp.json()
+                    detail = err_data.get("detail", {})
+                    if isinstance(detail, dict) and detail.get("status") == "quota_exceeded":
+                        raise RuntimeError(
+                            f"ElevenLabs quota exceeded: {detail.get('message', 'Upgrade your plan for more characters')}"
+                        )
+                except (ValueError, KeyError):
+                    pass
             resp.raise_for_status()
             break
 
