@@ -704,14 +704,19 @@ local win = disp:AddWindow({
             -- ========================
             ui:VGroup{
                 ID = "VoicePage",
-                ui:Label{Text = "<h3>Voice Setup</h3><p>Assign voices to characters. Clone from samples or use cloud voices.</p>", Alignment = {AlignHCenter = true}},
-                ui:Tree{ID = "VoiceTree", HeaderHidden = false, MinimumSize = {500, 160}},
+                ui:Label{Text = "<h3>Voice Setup</h3><p>Assign voices to characters from cloud library or clone from samples.</p>", Alignment = {AlignHCenter = true}},
+                ui:Tree{ID = "VoiceTree", HeaderHidden = false, MinimumSize = {500, 120}},
+                ui:HGroup{
+                    ui:Label{Text = "Assign Voice:", Weight = 0.12},
+                    ui:ComboBox{ID = "VoiceAssignCombo", Weight = 0.55},
+                    ui:Button{ID = "AssignVoice", Text = "Assign to Selected", Weight = 0.2},
+                    ui:Button{ID = "FetchCloudVoices", Text = "Fetch Voices", Weight = 0.13},
+                },
                 ui:HGroup{
                     ui:Button{ID = "BrowseVoice", Text = "Add Sample", Weight = 0.2},
                     ui:Button{ID = "CloneVoice", Text = "Clone Voice", Weight = 0.2},
-                    ui:Button{ID = "FetchCloudVoices", Text = "Fetch Cloud Voices", Weight = 0.25},
                     ui:Button{ID = "TestVoice", Text = "Test", Weight = 0.1},
-                    ui:Label{Text = "", Weight = 0.25},
+                    ui:Label{Text = "", Weight = 0.5},
                 },
                 ui:HGroup{
                     ui:Label{Text = "TTS Model:", Weight = 0.12},
@@ -1885,7 +1890,10 @@ end
 -- STEP 7: Voice Cloning
 -- ============================================================
 
--- Fetch voices from ElevenLabs cloud account
+-- Storage for fetched cloud voices (name -> voice_id)
+local availableCloudVoices = {}  -- {displayName -> voice_id}
+
+-- Fetch voices from ElevenLabs and populate the Assign Voice dropdown
 function win.On.FetchCloudVoices.Clicked(ev)
     local voicePid = config.voiceProvider
     if voicePid ~= "elevenlabs" then
@@ -1899,7 +1907,7 @@ function win.On.FetchCloudVoices.Clicked(ev)
         itm.VoiceProgress.StyleSheet = "color: red;"
         return
     end
-    itm.VoiceProgress.Text = "Fetching voices from ElevenLabs..."
+    itm.VoiceProgress.Text = "Fetching voices..."
     itm.VoiceProgress.StyleSheet = "color: #888;"
 
     local keyfile = os.tmpname()
@@ -1927,18 +1935,15 @@ function win.On.FetchCloudVoices.Clicked(ev)
     if jsonStr then
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
+            -- Populate the Assign Voice dropdown (NOT the character tree)
             local cloudVoices = data.voices or {}
+            itm.VoiceAssignCombo:Clear()
+            availableCloudVoices = {}
             for _, v in ipairs(cloudVoices) do
                 local displayName = v.name
                 if v.gender and v.gender ~= "" then displayName = displayName .. " (" .. v.gender .. ")" end
-                -- Add to voice tree
-                local item = itm.VoiceTree:NewItem()
-                item.Text[0] = displayName
-                item.Text[1] = "cloud"
-                item.Text[2] = "(ElevenLabs)"
-                item.Text[3] = v.voice_id
-                itm.VoiceTree:AddTopLevelItem(item)
-                characterVoices[displayName] = v.voice_id
+                itm.VoiceAssignCombo:AddItem(displayName)
+                availableCloudVoices[displayName] = v.voice_id
             end
             -- Populate TTS model combo
             local models = data.models or {}
@@ -1952,8 +1957,8 @@ function win.On.FetchCloudVoices.Clicked(ev)
                     break
                 end
             end
-            itm.VoiceProgress.Text = "Loaded " .. tostring(#cloudVoices) .. " voices, " .. tostring(#models) .. " models"
-            itm.VoiceProgress.StyleSheet = "color: green; font-weight: bold;"
+            itm.VoiceProgress.Text = tostring(#cloudVoices) .. " voices loaded — select a character, pick a voice, click Assign"
+            itm.VoiceProgress.StyleSheet = "color: green;"
         else
             itm.VoiceProgress.Text = "Error: " .. (data and data.error or "Unknown")
             itm.VoiceProgress.StyleSheet = "color: red;"
@@ -1962,6 +1967,46 @@ function win.On.FetchCloudVoices.Clicked(ev)
         itm.VoiceProgress.Text = "Failed to fetch voices"
         itm.VoiceProgress.StyleSheet = "color: red;"
     end
+end
+
+-- Assign the selected cloud voice to the selected character
+function win.On.AssignVoice.Clicked(ev)
+    local selected = itm.VoiceTree:CurrentItem()
+    if not selected then
+        itm.VoiceProgress.Text = "Select a character from the list first"
+        itm.VoiceProgress.StyleSheet = "color: orange;"
+        return
+    end
+
+    local voiceIdx = itm.VoiceAssignCombo.CurrentIndex
+    local voiceCount = 0
+    -- Count items in combo to validate
+    for displayName, _ in pairs(availableCloudVoices) do
+        voiceCount = voiceCount + 1
+    end
+    if voiceCount == 0 then
+        itm.VoiceProgress.Text = "Fetch voices first (click 'Fetch Voices')"
+        itm.VoiceProgress.StyleSheet = "color: orange;"
+        return
+    end
+
+    -- Get the selected voice name from the combo text
+    local voiceName = itm.VoiceAssignCombo.CurrentText or ""
+    local voiceId = availableCloudVoices[voiceName]
+    if not voiceId then
+        itm.VoiceProgress.Text = "Select a voice from the dropdown"
+        itm.VoiceProgress.StyleSheet = "color: orange;"
+        return
+    end
+
+    -- Assign to the selected character
+    local charName = selected.Text[0]
+    selected.Text[2] = voiceName  -- Show voice name in Voice Sample column
+    selected.Text[3] = voiceId    -- Store voice_id
+    characterVoices[charName] = voiceId
+
+    itm.VoiceProgress.Text = charName .. " → " .. voiceName
+    itm.VoiceProgress.StyleSheet = "color: green; font-weight: bold;"
 end
 
 function win.On.BrowseVoice.Clicked(ev)
