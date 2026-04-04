@@ -110,7 +110,7 @@ def generate_dialogue_audio(
         try:
             uid = uuid.uuid4().hex[:8]
             shot_idx = getattr(dl, 'shot_index', 0)
-            save_path = os.path.join(audio_dir, f"s{scene_index}_sh{shot_idx}_{uid}.wav")
+            save_path = os.path.join(audio_dir, f"s{scene_index}_sh{shot_idx}_{uid}.mp3")
 
             actual_path = provider.generate_speech(
                 voice_id=char.voice_id,
