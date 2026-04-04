@@ -2173,7 +2173,57 @@ function win.On.GenAllDialogue.Clicked(ev)
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
             generatedAudio = data.paths or {}
-            itm.DialogueProgress.Text = "Generated " .. tostring(data.count) .. " dialogue clips!"
+            local count = data.count or 0
+            if count > 0 then
+                -- Import audio to episode/scene bins
+                local importMsg = ""
+                local importOk, importErr = pcall(function()
+                    local project = resolve:GetProjectManager():GetCurrentProject()
+                    if project then
+                        local mp = project:GetMediaPool()
+                        local rootF = mp:GetRootFolder()
+                        local stsBin2 = nil
+                        for _, folder in pairs(rootF:GetSubFolders() or {}) do
+                            if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
+                        end
+                        if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
+                        local function findOrCreate(parent, name)
+                            if not parent then return nil end
+                            for _, f in pairs(parent:GetSubFolders() or {}) do
+                                if f:GetName() == name then return f end
+                            end
+                            return mp:AddSubFolder(parent, name)
+                        end
+                        local epPfx = buildEpisodePrefix()
+                        local importCount = 0
+                        for shotKey, audPath in pairs(generatedAudio) do
+                            if type(audPath) == "string" then
+                                local targetBin = stsBin2
+                                if epPfx ~= "" then
+                                    targetBin = findOrCreate(targetBin, epPfx)
+                                end
+                                local sNum = tonumber((shotKey or ""):match("^s(%d+)")) or 0
+                                targetBin = findOrCreate(targetBin, "S" .. tostring(sNum))
+                                targetBin = findOrCreate(targetBin, "Audio")
+                                if targetBin then mp:SetCurrentFolder(targetBin) end
+                                local items = mp:ImportMedia({audPath}) or {}
+                                for _, item in ipairs(items) do
+                                    local basename = audPath:match("([^/]+)$") or ""
+                                    pcall(function() item:SetMetadata("Comments", "STS:" .. basename) end)
+                                end
+                                importCount = importCount + #items
+                            end
+                        end
+                        importMsg = " (" .. tostring(importCount) .. " added to bin)"
+                    end
+                end)
+                if not importOk then
+                    print("[ScriptToScreen] Audio import warning: " .. tostring(importErr))
+                end
+                itm.DialogueProgress.Text = "Generated " .. tostring(count) .. " dialogue clips!" .. importMsg
+            else
+                itm.DialogueProgress.Text = "Generated 0 dialogue clips"
+            end
             itm.DialogueProgress.StyleSheet = "color: green; font-weight: bold;"
         else
             itm.DialogueProgress.Text = "Error: " .. (data and data.error or "Unknown")
