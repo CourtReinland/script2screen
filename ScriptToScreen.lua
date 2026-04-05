@@ -391,6 +391,21 @@ os.execute('mkdir -p "' .. outputDir .. '/videos"')
 os.execute('mkdir -p "' .. outputDir .. '/audio"')
 os.execute('mkdir -p "' .. outputDir .. '/lipsync"')
 
+-- Build episode prefix from config (e.g. "Ep1-Origins")
+local function buildEpisodePrefix()
+    local num = config.episodeNumber or ""
+    local title = config.episodeTitle or ""
+    if num == "" and title == "" then return "" end
+    local sanitizedTitle = title:gsub("[^%w]", "")
+    if num ~= "" and sanitizedTitle ~= "" then
+        return "Ep" .. num .. "-" .. sanitizedTitle
+    elseif num ~= "" then
+        return "Ep" .. num
+    else
+        return sanitizedTitle
+    end
+end
+
 -- Load saved config
 local configDir = homeDir .. "/Library/Application Support/ScriptToScreen"
 local configPath = configDir .. "/config.json"
