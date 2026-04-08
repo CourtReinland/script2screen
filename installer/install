@@ -49,36 +49,16 @@ dialog_password() {
     ' 2>/dev/null
 }
 
-# Progress window using a background osascript process
-PROGRESS_PID=""
-
-progress_start() {
-    osascript -e '
-        tell application "System Events"
-            set progressWin to display dialog "Starting ScriptToScreen installation..." with title "Installing ScriptToScreen v'"$STS_VERSION"'" buttons {"Cancel"} giving up after 600 with icon note
-        end tell
-    ' &>/dev/null &
-    PROGRESS_PID=$!
-}
-
+# Progress is logged to the log file only — no modal dialogs mid-install.
+# Modal dialogs block the installer and cause issues when killed/respawned.
+progress_start() { :; }
 progress_update() {
     local step="$1"
     local total="$2"
     local msg="$3"
-    # Kill previous dialog if running
-    kill $PROGRESS_PID 2>/dev/null || true
-    wait $PROGRESS_PID 2>/dev/null || true
-    osascript -e '
-        display dialog "'"[$step/$total] $msg"'" with title "Installing ScriptToScreen v'"$STS_VERSION"' ('"$step"'/'"$total"')" buttons {"Cancel"} giving up after 600 with icon note
-    ' &>/dev/null &
-    PROGRESS_PID=$!
+    log "[$step/$total] $msg"
 }
-
-progress_stop() {
-    kill $PROGRESS_PID 2>/dev/null || true
-    wait $PROGRESS_PID 2>/dev/null || true
-    PROGRESS_PID=""
-}
+progress_stop() { :; }
 
 # ============================================================================
 # Logging
@@ -100,7 +80,7 @@ log "========================================="
 # ============================================================================
 
 cleanup() {
-    progress_stop
+    :  # no-op
 }
 trap cleanup EXIT
 
@@ -247,15 +227,20 @@ VENV_PYTHON="$VENV_DIR/bin/python3"
 progress_update 4 $TOTAL_STEPS "Installing Python packages (this may take a minute)..."
 log "Step 4: Installing core Python packages..."
 
-"$VENV_PIP" install --upgrade pip setuptools wheel 2>&1 | tail -1
-"$VENV_PIP" install \
-    pdfplumber>=0.10.0 \
+# Upgrade pip (non-fatal if it fails)
+"$VENV_PIP" install --upgrade pip setuptools wheel 2>&1 | tail -3 || log "  Warning: pip upgrade failed"
+
+# Core packages — these MUST succeed
+if ! "$VENV_PIP" install \
+    "pdfplumber>=0.10.0" \
     "requests>=2.31.0" \
     "Pillow>=10.0.0" \
     PyJWT \
     gradio_client \
-    huggingface_hub \
-    2>&1 | tail -5
+    huggingface_hub 2>&1 | tee -a "$LOG_FILE" | tail -10; then
+    dialog_error "Failed to install Python packages. Check the log:\n$LOG_FILE"
+    exit 1
+fi
 
 log "  Core packages installed"
 
@@ -302,52 +287,14 @@ fi
 progress_update 6 $TOTAL_STEPS "Installing scripts to DaVinci Resolve..."
 log "Step 6: Installing Lua scripts..."
 
-# Check if Resolve directories exist
-RESOLVE_BASE="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts"
-if [ ! -d "$RESOLVE_BASE" ]; then
-    log "  Resolve scripts directory not found. Creating..."
-fi
-
-# We need sudo for /Library/ writes
-# Try with osascript privilege escalation
-SUDO_CMD=""
-install_with_privileges() {
-    osascript -e "do shell script \"$1\" with administrator privileges" 2>/dev/null
-}
-
-# Create directories
-install_with_privileges "mkdir -p '$RESOLVE_UTILITY' && mkdir -p '$RESOLVE_EDIT'" || {
-    dialog_error "Could not create Resolve script directories. Please run with admin privileges."
-    exit 1
-}
-
-# Install main wizard
-if [ -f "$PAYLOAD_DIR/ScriptToScreen.lua" ]; then
-    install_with_privileges "cp '$PAYLOAD_DIR/ScriptToScreen.lua' '$RESOLVE_UTILITY/' && chmod 755 '$RESOLVE_UTILITY/ScriptToScreen.lua'" || {
-        log "  Warning: Could not install ScriptToScreen.lua"
-    }
-    log "  Installed ScriptToScreen.lua"
-fi
-
-# Install standalone tools
-STANDALONE_SCRIPTS="STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua STS_Toolbar.lua STS_ExpandShots.lua"
-for script in $STANDALONE_SCRIPTS; do
-    if [ -f "$PAYLOAD_DIR/$script" ]; then
-        install_with_privileges "cp '$PAYLOAD_DIR/$script' '$RESOLVE_EDIT/' && chmod 755 '$RESOLVE_EDIT/$script'" || {
-            log "  Warning: Could not install $script"
-        }
-        log "  Installed $script"
-    fi
-done
-
-# Install Python entry point
-if [ -f "$PAYLOAD_DIR/ScriptToScreen.py" ]; then
-    install_with_privileges "cp '$PAYLOAD_DIR/ScriptToScreen.py' '$RESOLVE_UTILITY/' && chmod 755 '$RESOLVE_UTILITY/ScriptToScreen.py'" || true
-fi
-
-# ── Install Python package to user directory (no sudo needed) ──
+# ── Install Python package to user dir FIRST (no sudo needed) ──
 log "  Installing Python package to $USER_PKG_DIR..."
+mkdir -p "$USER_PKG_DIR"
 rm -rf "$USER_PKG_DIR/script_to_screen" 2>/dev/null || true
+if [ ! -d "$PAYLOAD_DIR/script_to_screen" ]; then
+    dialog_error "Installer payload corrupt: script_to_screen package not found at\n$PAYLOAD_DIR/script_to_screen"
+    exit 1
+fi
 cp -r "$PAYLOAD_DIR/script_to_screen" "$USER_PKG_DIR/"
 find "$USER_PKG_DIR/script_to_screen" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 chmod -R 755 "$USER_PKG_DIR/script_to_screen"
@@ -355,6 +302,83 @@ log "  Python package installed"
 
 # Create config directory
 mkdir -p "$HOME/.config/script_to_screen"
+
+# ── Build ONE admin script that does ALL /Library/ writes in one sudo session ──
+STANDALONE_SCRIPTS="STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua STS_Toolbar.lua STS_ExpandShots.lua"
+
+ADMIN_SCRIPT="/tmp/sts_install_admin_$$.sh"
+cat > "$ADMIN_SCRIPT" <<ADMIN_EOF
+#!/bin/bash
+set -e
+
+RESOLVE_UTILITY="$RESOLVE_UTILITY"
+RESOLVE_EDIT="$RESOLVE_EDIT"
+PAYLOAD_DIR="$PAYLOAD_DIR"
+USER="$USER"
+
+# Create target directories
+mkdir -p "\$RESOLVE_UTILITY"
+mkdir -p "\$RESOLVE_EDIT"
+
+# Install main wizard
+if [ -f "\$PAYLOAD_DIR/ScriptToScreen.lua" ]; then
+    cp "\$PAYLOAD_DIR/ScriptToScreen.lua" "\$RESOLVE_UTILITY/ScriptToScreen.lua"
+    chmod 755 "\$RESOLVE_UTILITY/ScriptToScreen.lua"
+    chown "\$USER":staff "\$RESOLVE_UTILITY/ScriptToScreen.lua" 2>/dev/null || true
+fi
+
+# Install Python entry point
+if [ -f "\$PAYLOAD_DIR/ScriptToScreen.py" ]; then
+    cp "\$PAYLOAD_DIR/ScriptToScreen.py" "\$RESOLVE_UTILITY/ScriptToScreen.py"
+    chmod 755 "\$RESOLVE_UTILITY/ScriptToScreen.py"
+    chown "\$USER":staff "\$RESOLVE_UTILITY/ScriptToScreen.py" 2>/dev/null || true
+fi
+
+# Install all standalone tools
+for script in $STANDALONE_SCRIPTS; do
+    if [ -f "\$PAYLOAD_DIR/\$script" ]; then
+        cp "\$PAYLOAD_DIR/\$script" "\$RESOLVE_EDIT/\$script"
+        chmod 755 "\$RESOLVE_EDIT/\$script"
+        chown "\$USER":staff "\$RESOLVE_EDIT/\$script" 2>/dev/null || true
+    fi
+done
+
+# Also mirror the Python package into /Library/ for plugins that look there
+if [ -d "\$PAYLOAD_DIR/script_to_screen" ]; then
+    rm -rf "\$RESOLVE_UTILITY/script_to_screen" 2>/dev/null || true
+    cp -R "\$PAYLOAD_DIR/script_to_screen" "\$RESOLVE_UTILITY/script_to_screen"
+    chmod -R 755 "\$RESOLVE_UTILITY/script_to_screen"
+    chown -R "\$USER":staff "\$RESOLVE_UTILITY/script_to_screen" 2>/dev/null || true
+fi
+
+echo "ADMIN_INSTALL_OK"
+ADMIN_EOF
+chmod +x "$ADMIN_SCRIPT"
+
+log "  Running admin install script: $ADMIN_SCRIPT"
+
+# Run the admin script via osascript — SINGLE password prompt
+ADMIN_OUTPUT=$(osascript <<OSASCRIPT_EOF 2>&1
+do shell script "bash '$ADMIN_SCRIPT' 2>&1" with administrator privileges with prompt "ScriptToScreen needs admin access to install into DaVinci Resolve's scripts directory."
+OSASCRIPT_EOF
+) || {
+    ADMIN_EXIT=$?
+    log "  Admin install failed (exit $ADMIN_EXIT): $ADMIN_OUTPUT"
+    rm -f "$ADMIN_SCRIPT"
+    dialog_error "Admin installation failed.\n\n$ADMIN_OUTPUT\n\nCheck log: $LOG_FILE"
+    exit 1
+}
+
+rm -f "$ADMIN_SCRIPT"
+
+if [[ "$ADMIN_OUTPUT" != *"ADMIN_INSTALL_OK"* ]]; then
+    log "  Admin script did not complete successfully: $ADMIN_OUTPUT"
+    dialog_error "Installation of Lua scripts failed.\n\nOutput:\n$ADMIN_OUTPUT\n\nCheck log: $LOG_FILE"
+    exit 1
+fi
+
+log "  Admin install output: $ADMIN_OUTPUT"
+log "  Lua scripts installed successfully"
 
 # ============================================================================
 # Step 7: Verify installation
@@ -364,27 +388,34 @@ progress_update 7 $TOTAL_STEPS "Verifying installation..."
 log "Step 7: Verifying..."
 
 ERRORS=0
+MISSING_FILES=()
 
-# Check Lua scripts
+# Check main wizard
 if [ -f "$RESOLVE_UTILITY/ScriptToScreen.lua" ]; then
-    log "  [OK] Main wizard installed"
+    log "  [OK] ScriptToScreen.lua"
 else
-    log "  [FAIL] Main wizard missing"
+    log "  [FAIL] ScriptToScreen.lua missing from $RESOLVE_UTILITY"
+    MISSING_FILES+=("ScriptToScreen.lua (Utility)")
     ERRORS=$((ERRORS + 1))
 fi
 
-if [ -f "$RESOLVE_EDIT/STS_Common.lua" ]; then
-    log "  [OK] Standalone tools installed"
-else
-    log "  [FAIL] Standalone tools missing"
-    ERRORS=$((ERRORS + 1))
-fi
+# Check EVERY standalone tool individually
+for script in STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua STS_Toolbar.lua STS_ExpandShots.lua; do
+    if [ -f "$RESOLVE_EDIT/$script" ]; then
+        log "  [OK] $script"
+    else
+        log "  [FAIL] $script missing from $RESOLVE_EDIT"
+        MISSING_FILES+=("$script (Edit)")
+        ERRORS=$((ERRORS + 1))
+    fi
+done
 
 # Check Python package
 if [ -f "$USER_PKG_DIR/script_to_screen/__init__.py" ]; then
-    log "  [OK] Python package installed"
+    log "  [OK] Python package (user dir)"
 else
-    log "  [FAIL] Python package missing"
+    log "  [FAIL] Python package missing from $USER_PKG_DIR"
+    MISSING_FILES+=("script_to_screen package")
     ERRORS=$((ERRORS + 1))
 fi
 
@@ -392,7 +423,8 @@ fi
 if "$VENV_PYTHON" -c "import pdfplumber, requests, PIL; print('OK')" 2>/dev/null; then
     log "  [OK] Python dependencies"
 else
-    log "  [FAIL] Python dependencies"
+    log "  [FAIL] Python dependencies broken"
+    MISSING_FILES+=("Python deps (pdfplumber/requests/Pillow)")
     ERRORS=$((ERRORS + 1))
 fi
 
@@ -414,14 +446,14 @@ progress_stop
 if [ "$ERRORS" -eq 0 ]; then
     log "Installation complete! No errors."
     osascript -e '
-        display dialog "ScriptToScreen v'"$STS_VERSION"' installed successfully!\n\nNext steps:\n\n  1. Restart DaVinci Resolve\n  2. Go to Workspace \u2192 Scripts \u2192 ScriptToScreen\n  3. Configure your API keys in Step 1 of the wizard\n\nAPI keys needed (get these from each provider):\n  \u2022 Grok: xai.com\n  \u2022 ElevenLabs: elevenlabs.io\n  \u2022 Kling AI: klingai.com\n\nInstall log: '"$LOG_FILE"'" with title "ScriptToScreen Installed!" buttons {"Open API Guide", "Done"} default button "Done" with icon note
-    ' 2>/dev/null && {
-        # If user clicked "Open API Guide", open the guide
-        # (The button result isn't easily captured, so this is optional)
-        true
-    }
+        display dialog "ScriptToScreen v'"$STS_VERSION"' installed successfully!\n\nNext steps:\n\n  1. Restart DaVinci Resolve\n  2. Go to Workspace \u2192 Scripts \u2192 ScriptToScreen\n  3. Configure your API keys in Step 1 of the wizard\n\nAPI keys needed (get these from each provider):\n  \u2022 Grok: xai.com\n  \u2022 ElevenLabs: elevenlabs.io\n  \u2022 Kling AI: klingai.com\n\nInstall log: '"$LOG_FILE"'" with title "ScriptToScreen Installed!" buttons {"Done"} default button "Done" with icon note
+    ' 2>/dev/null || true
 else
-    dialog_error "Installation completed with $ERRORS error(s).\n\nCheck the log for details:\n$LOG_FILE"
+    MISSING_LIST=""
+    for f in "${MISSING_FILES[@]}"; do
+        MISSING_LIST="${MISSING_LIST}  • ${f}\n"
+    done
+    dialog_error "Installation FAILED with $ERRORS error(s).\n\nMissing or broken:\n${MISSING_LIST}\nCheck the log for details:\n$LOG_FILE"
 fi
 
 log "Installer finished."
