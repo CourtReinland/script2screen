@@ -17,6 +17,7 @@ from .api.registry import (
     create_video_provider,
     create_voice_provider,
     create_lipsync_provider,
+    create_text_provider,
 )
 from .api.polling import poll_until_complete
 from .manifest import (
@@ -308,6 +309,99 @@ def generate_lipsync_standalone(
         )
 
         return {"status": "ok", "file_path": save_path, "filename": filename}
+
+    except Exception as e:
+        return {"status": "error", "error": str(e), "trace": traceback.format_exc()}
+
+
+# ------------------------------------------------------------------
+# Standalone Shot Expansion (SORA-style coverage enhancement)
+# ------------------------------------------------------------------
+
+def expand_shots_standalone(
+    script_path: str,
+    api_key: str,
+    project_slug: str,
+    expansion_ratio: float = 0.5,
+    style: str = "standard",
+    output_dir: str = "",
+    provider_id: str = "grok",
+) -> dict:
+    """Parse a screenplay, expand its shot list via LLM, write a new fountain file.
+
+    Args:
+        script_path: Path to the input .pdf or .fountain screenplay.
+        api_key: API key for the text provider (Grok).
+        project_slug: Project slug for manifest/output location.
+        expansion_ratio: Target ratio of extra shots (0.5 = +50%, 1.0 = double).
+        style: "conservative", "standard", or "aggressive".
+        output_dir: Directory to write the expanded fountain file.
+        provider_id: Text provider id (defaults to "grok").
+
+    Returns:
+        {"status": "ok",
+         "original_count": N,
+         "expanded_count": M,
+         "added_count": M - N,
+         "screenplay_path": "<path>/expanded_screenplay.fountain"}
+    """
+    try:
+        from .parsing.pdf_parser import parse_pdf
+        from .parsing.fountain_parser import parse_fountain
+        from .parsing.fountain_writer import write_fountain
+        from .pipeline.shot_expansion import expand_screenplay_shots
+
+        if not os.path.isfile(script_path):
+            return {"status": "error", "error": f"Script not found: {script_path}"}
+
+        # Parse the input screenplay
+        lower = script_path.lower()
+        if lower.endswith(".pdf"):
+            screenplay = parse_pdf(script_path)
+        elif lower.endswith((".fountain", ".txt")):
+            screenplay = parse_fountain(script_path)
+        else:
+            return {"status": "error", "error": f"Unsupported script format: {script_path}"}
+
+        original_count = sum(len(s.shots) for s in screenplay.scenes)
+        if original_count == 0:
+            return {"status": "error", "error": "No shots found in screenplay"}
+
+        # Create text provider
+        provider = create_text_provider(provider_id, api_key=api_key)
+
+        # Expand
+        expanded = expand_screenplay_shots(
+            screenplay=screenplay,
+            provider=provider,
+            expansion_ratio=expansion_ratio,
+            style=style,
+        )
+
+        expanded_count = sum(len(s.shots) for s in expanded.scenes)
+
+        # Write output fountain file
+        if not output_dir:
+            output_dir = os.path.dirname(script_path)
+        ensure_dir(output_dir)
+
+        base = os.path.splitext(os.path.basename(script_path))[0]
+        uid = uuid.uuid4().hex[:8]
+        out_filename = f"{base}_expanded_{style}_{uid}.fountain"
+        out_path = os.path.join(output_dir, out_filename)
+
+        write_fountain(expanded, out_path)
+
+        return {
+            "status": "ok",
+            "original_count": original_count,
+            "expanded_count": expanded_count,
+            "added_count": expanded_count - original_count,
+            "screenplay_path": out_path,
+            "filename": out_filename,
+            "style": style,
+            "expansion_ratio": expansion_ratio,
+        }
 
     except Exception as e:
         return {"status": "error", "error": str(e), "trace": traceback.format_exc()}

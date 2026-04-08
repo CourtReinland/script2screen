@@ -150,3 +150,30 @@ class LipsyncProvider(ABC):
     def check_lipsync_status(self, task_id: str) -> dict:
         """Returns dict with 'status', 'videos', 'error' keys."""
         ...
+
+
+class TextProvider(ABC):
+    """Interface for text/chat LLM backends (used for shot expansion, etc.)."""
+
+    @abstractmethod
+    def test_connection(self) -> bool: ...
+
+    @abstractmethod
+    def test_connection_details(self) -> tuple[bool, str]: ...
+
+    @abstractmethod
+    def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        response_format: str = "text",  # "text" or "json"
+        **kwargs,
+    ) -> str:
+        """Submit a chat completion. Returns the response text.
+
+        If response_format is "json", the LLM is asked to return valid JSON
+        and the returned string will be parseable by json.loads().
+        """
+        ...

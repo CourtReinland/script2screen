@@ -19,6 +19,7 @@ class Shot:
     description: str
     scene_index: int
     characters_present: list[str] = field(default_factory=list)
+    origin: str = "original"  # "original" from script or "expanded" from LLM shot expander
 
     @property
     def prompt_prefix(self) -> str:

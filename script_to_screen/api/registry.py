@@ -4,7 +4,7 @@ import logging
 from typing import Callable, Any
 
 from .providers import (
-    ImageProvider, VideoProvider, VoiceProvider, LipsyncProvider, ProviderInfo
+    ImageProvider, VideoProvider, VoiceProvider, LipsyncProvider, TextProvider, ProviderInfo
 )
 
 logger = logging.getLogger("ScriptToScreen")
@@ -14,6 +14,7 @@ _IMAGE_PROVIDERS: dict[str, tuple[ProviderInfo, Callable[..., ImageProvider]]] =
 _VIDEO_PROVIDERS: dict[str, tuple[ProviderInfo, Callable[..., VideoProvider]]] = {}
 _VOICE_PROVIDERS: dict[str, tuple[ProviderInfo, Callable[..., VoiceProvider]]] = {}
 _LIPSYNC_PROVIDERS: dict[str, tuple[ProviderInfo, Callable[..., LipsyncProvider]]] = {}
+_TEXT_PROVIDERS: dict[str, tuple[ProviderInfo, Callable[..., TextProvider]]] = {}
 
 
 # ── Registration functions ───────────────────────────────────────
@@ -30,6 +31,9 @@ def register_voice_provider(info: ProviderInfo, factory: Callable[..., VoiceProv
 def register_lipsync_provider(info: ProviderInfo, factory: Callable[..., LipsyncProvider]):
     _LIPSYNC_PROVIDERS[info.id] = (info, factory)
 
+def register_text_provider(info: ProviderInfo, factory: Callable[..., TextProvider]):
+    _TEXT_PROVIDERS[info.id] = (info, factory)
+
 
 # ── Query functions ──────────────────────────────────────────────
 
@@ -44,6 +48,9 @@ def get_voice_providers() -> list[ProviderInfo]:
 
 def get_lipsync_providers() -> list[ProviderInfo]:
     return [info for info, _ in _LIPSYNC_PROVIDERS.values()]
+
+def get_text_providers() -> list[ProviderInfo]:
+    return [info for info, _ in _TEXT_PROVIDERS.values()]
 
 
 # ── Factory functions ────────────────────────────────────────────
@@ -82,6 +89,15 @@ def create_lipsync_provider(provider_id: str, **kwargs) -> LipsyncProvider:
             f"Available: {list(_LIPSYNC_PROVIDERS.keys())}"
         )
     info, factory = _LIPSYNC_PROVIDERS[provider_id]
+    return factory(**kwargs)
+
+def create_text_provider(provider_id: str, **kwargs) -> TextProvider:
+    if provider_id not in _TEXT_PROVIDERS:
+        raise ValueError(
+            f"Unknown text provider '{provider_id}'. "
+            f"Available: {list(_TEXT_PROVIDERS.keys())}"
+        )
+    info, factory = _TEXT_PROVIDERS[provider_id]
     return factory(**kwargs)
 
 
@@ -239,6 +255,24 @@ def _register_builtins():
         )
     except ImportError:
         logger.debug("MLX-Audio provider not available (missing mlx_audio_provider module)")
+
+    # Grok text/chat LLM (for shot expansion)
+    try:
+        from .grok_text_provider import GrokTextProvider
+
+        register_text_provider(
+            ProviderInfo(
+                id="grok",
+                name="Grok (xAI)",
+                category="text",
+                requires_api_key=True,
+                requires_server_url=False,
+                description="Grok chat LLM for shot expansion and other text generation",
+            ),
+            lambda api_key="", **kw: GrokTextProvider(api_key, **kw),
+        )
+    except ImportError:
+        logger.debug("Grok text provider not available")
 
     # Kling AI direct API (lip sync with JWT auth)
     try:
