@@ -81,8 +81,8 @@ class KlingLipsyncProvider(LipsyncProvider):
 
     def generate_lipsync(
         self,
-        video_path_or_url: str,
-        audio_path_or_url: str,
+        video_url: str,
+        audio_url: Optional[str] = None,
         **kwargs,
     ) -> str:
         """Submit a lip sync task. Returns task_id for polling.
@@ -91,36 +91,39 @@ class KlingLipsyncProvider(LipsyncProvider):
         Local video files are uploaded to tmpfiles.org to get a public URL.
         Local audio files can be sent as base64 (preferred) or uploaded.
         """
+        video_src = video_url
+        audio_src = audio_url or ""
+
         # Handle video source
-        video_url = None
-        if video_path_or_url.startswith("http"):
-            video_url = video_path_or_url
-        elif os.path.isfile(video_path_or_url):
+        resolved_video_url = None
+        if video_src.startswith("http"):
+            resolved_video_url = video_src
+        elif os.path.isfile(video_src):
             # Upload local video to get a public URL
-            video_url = _upload_to_tmpfiles(video_path_or_url)
+            resolved_video_url = _upload_to_tmpfiles(video_src)
         else:
-            raise FileNotFoundError(f"Video not found: {video_path_or_url}")
+            raise FileNotFoundError(f"Video not found: {video_src}")
 
         # Handle audio source
-        audio_url = None
+        resolved_audio_url = None
         audio_b64 = None
-        if audio_path_or_url.startswith("http"):
-            audio_url = audio_path_or_url
-        elif os.path.isfile(audio_path_or_url):
-            file_size = os.path.getsize(audio_path_or_url)
+        if audio_src.startswith("http"):
+            resolved_audio_url = audio_src
+        elif os.path.isfile(audio_src):
+            file_size = os.path.getsize(audio_src)
             if file_size <= 5 * 1024 * 1024:
                 # Small enough for base64 (preferred — no upload needed)
-                audio_b64 = KlingClient.audio_to_base64(audio_path_or_url)
-                logger.info(f"[Kling] Audio as base64: {os.path.basename(audio_path_or_url)}")
+                audio_b64 = KlingClient.audio_to_base64(audio_src)
+                logger.info(f"[Kling] Audio as base64: {os.path.basename(audio_src)}")
             else:
                 # Too large for base64 — upload instead
-                audio_url = _upload_to_tmpfiles(audio_path_or_url)
+                resolved_audio_url = _upload_to_tmpfiles(audio_src)
         else:
-            raise FileNotFoundError(f"Audio not found: {audio_path_or_url}")
+            raise FileNotFoundError(f"Audio not found: {audio_src}")
 
         return self._client.create_lipsync_task(
-            video_url=video_url,
-            audio_url=audio_url,
+            video_url=resolved_video_url,
+            audio_url=resolved_audio_url,
             audio_file_b64=audio_b64,
             mode="audio2video",
         )

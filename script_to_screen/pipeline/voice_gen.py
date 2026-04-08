@@ -98,6 +98,9 @@ def generate_dialogue_audio(
     tracker = ProgressTracker(len(all_dialogue), progress_callback)
     results: dict[str, str] = {}
 
+    # Track line order within each shot so filenames sort correctly
+    shot_line_counters: dict[str, int] = {}  # "s0_sh2" -> next line index
+
     for dialogue_key, dl, scene_index in all_dialogue:
         char = screenplay.characters.get(dl.character)
         if not char or not char.voice_id:
@@ -110,7 +113,10 @@ def generate_dialogue_audio(
         try:
             uid = uuid.uuid4().hex[:8]
             shot_idx = getattr(dl, 'shot_index', 0)
-            save_path = os.path.join(audio_dir, f"s{scene_index}_sh{shot_idx}_{uid}.mp3")
+            shot_key = f"s{scene_index}_sh{shot_idx}"
+            line_in_shot = shot_line_counters.get(shot_key, 0)
+            shot_line_counters[shot_key] = line_in_shot + 1
+            save_path = os.path.join(audio_dir, f"s{scene_index}_sh{shot_idx}_L{line_in_shot}_{uid}.mp3")
 
             actual_path = provider.generate_speech(
                 voice_id=char.voice_id,
@@ -173,11 +179,27 @@ def generate_shot_audio(
             if len(shot_dialogue_keys) == 1:
                 results[shot_key] = dialogue_audio_paths[shot_dialogue_keys[0]]
             else:
-                # TODO: Implement proper audio concatenation
-                results[shot_key] = dialogue_audio_paths[shot_dialogue_keys[0]]
-                logger.warning(
-                    f"Shot {shot_key} has {len(shot_dialogue_keys)} dialogue lines; "
-                    f"using first only (audio concat not yet implemented)"
-                )
+                # Merge multiple dialogue lines into one audio file
+                from .audio_merge import merge_shot_audio as _merge
+                audio_files = [dialogue_audio_paths[k] for k in shot_dialogue_keys]
+                merged_dir = ensure_dir(os.path.join(output_dir, "merged"))
+                try:
+                    merged = _merge(
+                        audio_dir=os.path.dirname(audio_files[0]),
+                        output_dir=merged_dir,
+                    )
+                    if shot_key in merged:
+                        results[shot_key] = merged[shot_key]
+                        logger.info(
+                            f"Shot {shot_key}: merged {len(shot_dialogue_keys)} "
+                            f"dialogue lines → {os.path.basename(merged[shot_key])}"
+                        )
+                    else:
+                        # Fallback to first file if merge didn't produce result
+                        results[shot_key] = dialogue_audio_paths[shot_dialogue_keys[0]]
+                        logger.warning(f"Shot {shot_key}: merge produced no output, using first line")
+                except Exception as e:
+                    results[shot_key] = dialogue_audio_paths[shot_dialogue_keys[0]]
+                    logger.warning(f"Shot {shot_key}: merge failed ({e}), using first line")
 
     return results

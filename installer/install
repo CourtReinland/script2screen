@@ -1,0 +1,427 @@
+#!/bin/bash
+# ============================================================================
+# ScriptToScreen Installer for macOS
+# One-click installer with native macOS dialogs
+# ============================================================================
+
+set -euo pipefail
+
+# Version
+STS_VERSION="1.0.0"
+
+# Paths
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RESOURCES_DIR="$(cd "$SCRIPT_DIR/../Resources" && pwd)"
+PAYLOAD_DIR="$RESOURCES_DIR/payload"
+
+RESOLVE_UTILITY="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+RESOLVE_EDIT="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
+USER_PKG_DIR="$HOME/Library/Application Support/ScriptToScreen"
+LOG_DIR="$HOME/Library/Logs/ScriptToScreen"
+LOG_FILE="$LOG_DIR/install.log"
+
+# Minimum Python version required
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=10
+
+# ============================================================================
+# Dialog Helpers (AppleScript)
+# ============================================================================
+
+dialog_info() {
+    osascript -e "display dialog \"$1\" with title \"ScriptToScreen Installer\" buttons {\"OK\"} default button \"OK\" with icon note" 2>/dev/null || true
+}
+
+dialog_error() {
+    osascript -e "display dialog \"$1\" with title \"ScriptToScreen Installer\" buttons {\"OK\"} default button \"OK\" with icon stop" 2>/dev/null || true
+}
+
+dialog_yesno() {
+    local result
+    result=$(osascript -e "display dialog \"$1\" with title \"ScriptToScreen Installer\" buttons {\"No\", \"Yes\"} default button \"Yes\" with icon caution" 2>/dev/null) || return 1
+    [[ "$result" == *"Yes"* ]] && return 0 || return 1
+}
+
+dialog_password() {
+    osascript -e '
+        display dialog "ScriptToScreen needs administrator access to install scripts into DaVinci Resolve.\n\nPlease enter your password:" with title "ScriptToScreen Installer" default answer "" with hidden answer with icon caution
+        text returned of result
+    ' 2>/dev/null
+}
+
+# Progress window using a background osascript process
+PROGRESS_PID=""
+
+progress_start() {
+    osascript -e '
+        tell application "System Events"
+            set progressWin to display dialog "Starting ScriptToScreen installation..." with title "Installing ScriptToScreen v'"$STS_VERSION"'" buttons {"Cancel"} giving up after 600 with icon note
+        end tell
+    ' &>/dev/null &
+    PROGRESS_PID=$!
+}
+
+progress_update() {
+    local step="$1"
+    local total="$2"
+    local msg="$3"
+    # Kill previous dialog if running
+    kill $PROGRESS_PID 2>/dev/null || true
+    wait $PROGRESS_PID 2>/dev/null || true
+    osascript -e '
+        display dialog "'"[$step/$total] $msg"'" with title "Installing ScriptToScreen v'"$STS_VERSION"' ('"$step"'/'"$total"')" buttons {"Cancel"} giving up after 600 with icon note
+    ' &>/dev/null &
+    PROGRESS_PID=$!
+}
+
+progress_stop() {
+    kill $PROGRESS_PID 2>/dev/null || true
+    wait $PROGRESS_PID 2>/dev/null || true
+    PROGRESS_PID=""
+}
+
+# ============================================================================
+# Logging
+# ============================================================================
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+log "========================================="
+log "ScriptToScreen Installer v$STS_VERSION"
+log "========================================="
+
+# ============================================================================
+# Cleanup on exit
+# ============================================================================
+
+cleanup() {
+    progress_stop
+}
+trap cleanup EXIT
+
+# ============================================================================
+# Welcome
+# ============================================================================
+
+osascript -e '
+display dialog "Welcome to ScriptToScreen v'"$STS_VERSION"'!\n\nThis will install:\n\n  \u2022 ScriptToScreen plugin for DaVinci Resolve\n  \u2022 Python environment with AI packages\n  \u2022 MLX-Audio for local voice synthesis (Apple Silicon)\n  \u2022 ffmpeg for audio processing\n\nYou will need:\n  \u2022 DaVinci Resolve Studio (free or paid)\n  \u2022 API keys for cloud services (configured later)\n\nClick Install to begin." with title "ScriptToScreen Installer" buttons {"Cancel", "Install"} default button "Install" with icon note
+' 2>/dev/null || { log "User cancelled"; exit 0; }
+
+TOTAL_STEPS=7
+
+# ============================================================================
+# Step 1: Check/Install Homebrew
+# ============================================================================
+
+progress_update 1 $TOTAL_STEPS "Checking for Homebrew..."
+log "Step 1: Checking Homebrew..."
+
+BREW=""
+if command -v brew &>/dev/null; then
+    BREW="$(command -v brew)"
+    log "  Homebrew found: $BREW"
+elif [ -f /opt/homebrew/bin/brew ]; then
+    BREW="/opt/homebrew/bin/brew"
+    log "  Homebrew found: $BREW"
+elif [ -f /usr/local/bin/brew ]; then
+    BREW="/usr/local/bin/brew"
+    log "  Homebrew found: $BREW"
+fi
+
+if [ -z "$BREW" ]; then
+    log "  Homebrew not found, installing..."
+    progress_update 1 $TOTAL_STEPS "Installing Homebrew (this may take a minute)..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null || {
+        dialog_error "Failed to install Homebrew. Please install it manually:\nhttps://brew.sh"
+        exit 1
+    }
+    # Detect where brew was installed
+    if [ -f /opt/homebrew/bin/brew ]; then
+        BREW="/opt/homebrew/bin/brew"
+    elif [ -f /usr/local/bin/brew ]; then
+        BREW="/usr/local/bin/brew"
+    fi
+fi
+
+# Add brew to PATH for this session
+eval "$($BREW shellenv)" 2>/dev/null || true
+export PATH="$($BREW --prefix)/bin:$PATH"
+
+log "  Homebrew ready: $BREW"
+
+# ============================================================================
+# Step 2: Install Python 3.12+ and ffmpeg
+# ============================================================================
+
+progress_update 2 $TOTAL_STEPS "Installing Python and ffmpeg..."
+log "Step 2: Checking Python and ffmpeg..."
+
+# Find suitable Python
+PYTHON=""
+for candidate in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" &>/dev/null; then
+        ver=$("$candidate" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
+        major=$(echo "$ver" | cut -d. -f1)
+        minor=$(echo "$ver" | cut -d. -f2)
+        if [ "$major" -ge "$MIN_PYTHON_MAJOR" ] && [ "$minor" -ge "$MIN_PYTHON_MINOR" ]; then
+            PYTHON="$(command -v "$candidate")"
+            log "  Found Python $ver at $PYTHON"
+            break
+        fi
+    fi
+done
+
+# Also check brew Python paths
+if [ -z "$PYTHON" ]; then
+    for pyver in 3.14 3.13 3.12; do
+        candidate="$($BREW --prefix)/opt/python@$pyver/bin/python3"
+        if [ -f "$candidate" ]; then
+            PYTHON="$candidate"
+            log "  Found brew Python at $PYTHON"
+            break
+        fi
+    done
+fi
+
+# Install Python if not found
+if [ -z "$PYTHON" ]; then
+    log "  Python >= $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR not found, installing via Homebrew..."
+    $BREW install python@3.12 || {
+        dialog_error "Failed to install Python. Please install Python 3.12+ manually."
+        exit 1
+    }
+    PYTHON="$($BREW --prefix)/opt/python@3.12/bin/python3"
+fi
+
+# Install ffmpeg if needed
+FFMPEG=""
+for ff in "$(command -v ffmpeg 2>/dev/null)" "$($BREW --prefix 2>/dev/null)/bin/ffmpeg" "/opt/homebrew/bin/ffmpeg" "/usr/local/bin/ffmpeg"; do
+    if [ -n "$ff" ] && [ -f "$ff" ] && [ -x "$ff" ]; then
+        FFMPEG="$ff"
+        break
+    fi
+done
+
+if [ -z "$FFMPEG" ]; then
+    log "  ffmpeg not found, installing via Homebrew..."
+    $BREW install ffmpeg || {
+        log "  Warning: ffmpeg install failed. Audio merging may not work."
+    }
+fi
+
+log "  Python: $PYTHON ($($PYTHON --version 2>&1))"
+log "  ffmpeg: ${FFMPEG:-not found}"
+
+# ============================================================================
+# Step 3: Create main Python virtual environment
+# ============================================================================
+
+progress_update 3 $TOTAL_STEPS "Creating Python virtual environment..."
+log "Step 3: Creating main venv..."
+
+VENV_DIR="$USER_PKG_DIR/venv"
+mkdir -p "$USER_PKG_DIR"
+
+if [ ! -f "$VENV_DIR/bin/python3" ]; then
+    "$PYTHON" -m venv "$VENV_DIR" || {
+        dialog_error "Failed to create Python virtual environment."
+        exit 1
+    }
+    log "  Created venv at $VENV_DIR"
+else
+    log "  Venv already exists at $VENV_DIR"
+fi
+
+VENV_PIP="$VENV_DIR/bin/pip"
+VENV_PYTHON="$VENV_DIR/bin/python3"
+
+# ============================================================================
+# Step 4: Install core Python packages
+# ============================================================================
+
+progress_update 4 $TOTAL_STEPS "Installing Python packages (this may take a minute)..."
+log "Step 4: Installing core Python packages..."
+
+"$VENV_PIP" install --upgrade pip setuptools wheel 2>&1 | tail -1
+"$VENV_PIP" install \
+    pdfplumber>=0.10.0 \
+    "requests>=2.31.0" \
+    "Pillow>=10.0.0" \
+    PyJWT \
+    gradio_client \
+    huggingface_hub \
+    2>&1 | tail -5
+
+log "  Core packages installed"
+
+# ============================================================================
+# Step 5: Set up MLX-Audio venv (Apple Silicon local TTS)
+# ============================================================================
+
+progress_update 5 $TOTAL_STEPS "Setting up MLX-Audio for local voice synthesis..."
+log "Step 5: Setting up MLX-Audio..."
+
+MLX_VENV_DIR="$USER_PKG_DIR/mlx-venv"
+
+# Only set up MLX on Apple Silicon
+ARCH="$(uname -m)"
+if [ "$ARCH" = "arm64" ]; then
+    if [ ! -f "$MLX_VENV_DIR/bin/python3" ]; then
+        "$PYTHON" -m venv "$MLX_VENV_DIR" || {
+            log "  Warning: Failed to create MLX venv. Local TTS will not be available."
+        }
+    fi
+
+    if [ -f "$MLX_VENV_DIR/bin/pip" ]; then
+        "$MLX_VENV_DIR/bin/pip" install --upgrade pip setuptools wheel 2>&1 | tail -1
+
+        # Install MLX-Audio and dependencies
+        if [ -f "$RESOURCES_DIR/requirements-mlx.txt" ]; then
+            "$MLX_VENV_DIR/bin/pip" install -r "$RESOURCES_DIR/requirements-mlx.txt" 2>&1 | tail -5
+        else
+            "$MLX_VENV_DIR/bin/pip" install \
+                mlx \
+                mlx-audio \
+                2>&1 | tail -5
+        fi
+        log "  MLX-Audio installed in $MLX_VENV_DIR"
+    fi
+else
+    log "  Skipping MLX-Audio (requires Apple Silicon, detected: $ARCH)"
+fi
+
+# ============================================================================
+# Step 6: Install Lua scripts to DaVinci Resolve
+# ============================================================================
+
+progress_update 6 $TOTAL_STEPS "Installing scripts to DaVinci Resolve..."
+log "Step 6: Installing Lua scripts..."
+
+# Check if Resolve directories exist
+RESOLVE_BASE="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts"
+if [ ! -d "$RESOLVE_BASE" ]; then
+    log "  Resolve scripts directory not found. Creating..."
+fi
+
+# We need sudo for /Library/ writes
+# Try with osascript privilege escalation
+SUDO_CMD=""
+install_with_privileges() {
+    osascript -e "do shell script \"$1\" with administrator privileges" 2>/dev/null
+}
+
+# Create directories
+install_with_privileges "mkdir -p '$RESOLVE_UTILITY' && mkdir -p '$RESOLVE_EDIT'" || {
+    dialog_error "Could not create Resolve script directories. Please run with admin privileges."
+    exit 1
+}
+
+# Install main wizard
+if [ -f "$PAYLOAD_DIR/ScriptToScreen.lua" ]; then
+    install_with_privileges "cp '$PAYLOAD_DIR/ScriptToScreen.lua' '$RESOLVE_UTILITY/' && chmod 755 '$RESOLVE_UTILITY/ScriptToScreen.lua'" || {
+        log "  Warning: Could not install ScriptToScreen.lua"
+    }
+    log "  Installed ScriptToScreen.lua"
+fi
+
+# Install standalone tools
+STANDALONE_SCRIPTS="STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua STS_Toolbar.lua STS_ExpandShots.lua"
+for script in $STANDALONE_SCRIPTS; do
+    if [ -f "$PAYLOAD_DIR/$script" ]; then
+        install_with_privileges "cp '$PAYLOAD_DIR/$script' '$RESOLVE_EDIT/' && chmod 755 '$RESOLVE_EDIT/$script'" || {
+            log "  Warning: Could not install $script"
+        }
+        log "  Installed $script"
+    fi
+done
+
+# Install Python entry point
+if [ -f "$PAYLOAD_DIR/ScriptToScreen.py" ]; then
+    install_with_privileges "cp '$PAYLOAD_DIR/ScriptToScreen.py' '$RESOLVE_UTILITY/' && chmod 755 '$RESOLVE_UTILITY/ScriptToScreen.py'" || true
+fi
+
+# ── Install Python package to user directory (no sudo needed) ──
+log "  Installing Python package to $USER_PKG_DIR..."
+rm -rf "$USER_PKG_DIR/script_to_screen" 2>/dev/null || true
+cp -r "$PAYLOAD_DIR/script_to_screen" "$USER_PKG_DIR/"
+find "$USER_PKG_DIR/script_to_screen" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+chmod -R 755 "$USER_PKG_DIR/script_to_screen"
+log "  Python package installed"
+
+# Create config directory
+mkdir -p "$HOME/.config/script_to_screen"
+
+# ============================================================================
+# Step 7: Verify installation
+# ============================================================================
+
+progress_update 7 $TOTAL_STEPS "Verifying installation..."
+log "Step 7: Verifying..."
+
+ERRORS=0
+
+# Check Lua scripts
+if [ -f "$RESOLVE_UTILITY/ScriptToScreen.lua" ]; then
+    log "  [OK] Main wizard installed"
+else
+    log "  [FAIL] Main wizard missing"
+    ERRORS=$((ERRORS + 1))
+fi
+
+if [ -f "$RESOLVE_EDIT/STS_Common.lua" ]; then
+    log "  [OK] Standalone tools installed"
+else
+    log "  [FAIL] Standalone tools missing"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check Python package
+if [ -f "$USER_PKG_DIR/script_to_screen/__init__.py" ]; then
+    log "  [OK] Python package installed"
+else
+    log "  [FAIL] Python package missing"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check venv
+if "$VENV_PYTHON" -c "import pdfplumber, requests, PIL; print('OK')" 2>/dev/null; then
+    log "  [OK] Python dependencies"
+else
+    log "  [FAIL] Python dependencies"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check MLX (non-critical)
+if [ "$ARCH" = "arm64" ] && [ -f "$MLX_VENV_DIR/bin/python3" ]; then
+    if "$MLX_VENV_DIR/bin/python3" -c "import mlx; print('OK')" 2>/dev/null; then
+        log "  [OK] MLX-Audio installed"
+    else
+        log "  [WARN] MLX-Audio not fully installed (local TTS may not work)"
+    fi
+fi
+
+progress_stop
+
+# ============================================================================
+# Done!
+# ============================================================================
+
+if [ "$ERRORS" -eq 0 ]; then
+    log "Installation complete! No errors."
+    osascript -e '
+        display dialog "ScriptToScreen v'"$STS_VERSION"' installed successfully!\n\nNext steps:\n\n  1. Restart DaVinci Resolve\n  2. Go to Workspace \u2192 Scripts \u2192 ScriptToScreen\n  3. Configure your API keys in Step 1 of the wizard\n\nAPI keys needed (get these from each provider):\n  \u2022 Grok: xai.com\n  \u2022 ElevenLabs: elevenlabs.io\n  \u2022 Kling AI: klingai.com\n\nInstall log: '"$LOG_FILE"'" with title "ScriptToScreen Installed!" buttons {"Open API Guide", "Done"} default button "Done" with icon note
+    ' 2>/dev/null && {
+        # If user clicked "Open API Guide", open the guide
+        # (The button result isn't easily captured, so this is optional)
+        true
+    }
+else
+    dialog_error "Installation completed with $ERRORS error(s).\n\nCheck the log for details:\n$LOG_FILE"
+fi
+
+log "Installer finished."

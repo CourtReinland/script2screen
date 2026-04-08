@@ -2269,60 +2269,157 @@ function win.On.SyncAll.Clicked(ev)
         return
     end
 
-    itm.LipSyncProgress.Text = "Running lip sync... (this takes a while)"
+    itm.LipSyncProgress.Text = "Merging dialogue audio per shot..."
     itm.LipSyncProgress.StyleSheet = "color: #888;"
 
     local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
 
-    -- Write API key to temp file
+    -- Write API key to temp file (reused across all calls)
     local keyfile = os.tmpname()
     local kf = io.open(keyfile, "w")
     if kf then kf:write(lsKey); kf:close() end
 
-    local code = 'import json, traceback, os, glob, re\n'
+    -- Step 1: Merge per-line audio files into one per shot, then discover pairs
+    -- This handles shots with multiple dialogue lines (e.g. AIDEN then ALIYAH)
+    -- by concatenating them in script order before sending to lip sync.
+    local discoverCode = 'import json, os, glob, re\n'
         .. 'try:\n'
-        .. '    from script_to_screen.api.registry import create_lipsync_provider\n'
-        .. '    from script_to_screen.pipeline.lipsync import generate_lipsync_for_shots\n'
-        .. '    from script_to_screen.parsing.screenplay_model import Screenplay\n'
+        .. '    from script_to_screen.pipeline.audio_merge import merge_shot_audio\n'
         .. '    video_dir = "' .. safeOutput .. '/videos"\n'
         .. '    audio_dir = "' .. safeOutput .. '/audio"\n'
-        .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
-        .. '    provider = create_lipsync_provider("' .. lsPid .. '", api_key=api_key)\n'
+        .. '    dialogue_dir = os.path.join(audio_dir, "dialogue_audio")\n'
+        .. '    merged_dir = os.path.join(audio_dir, "merged")\n'
+        .. '    # Merge per-line audio files into combined per-shot files\n'
+        .. '    merged = {}\n'
+        .. '    if os.path.isdir(dialogue_dir):\n'
+        .. '        merged = merge_shot_audio(dialogue_dir, merged_dir)\n'
+        .. '    merge_count = len(merged)\n'
         .. '    def _shot_key(filepath):\n'
         .. '        bn = os.path.splitext(os.path.basename(filepath))[0]\n'
         .. '        m = re.match(r"(s\\d+_sh\\d+)", bn)\n'
-        .. '        return m.group(1) if m else bn\n'
+        .. '        return m.group(1) if m else None\n'
         .. '    videos = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))\n'
-        .. '    # Search both audio/ and audio/dialogue_audio/ for audio files\n'
-        .. '    audios = sorted(\n'
-        .. '        glob.glob(os.path.join(audio_dir, "*.wav")) +\n'
-        .. '        glob.glob(os.path.join(audio_dir, "*.mp3")) +\n'
-        .. '        glob.glob(os.path.join(audio_dir, "dialogue_audio", "*.wav")) +\n'
-        .. '        glob.glob(os.path.join(audio_dir, "dialogue_audio", "*.mp3"))\n'
-        .. '    )\n'
-        .. '    video_paths = {_shot_key(v): v for v in videos}\n'
-        .. '    audio_paths = {_shot_key(a): a for a in audios}\n'
-        .. '    screenplay = Screenplay(title="lipsync")\n'
-        .. '    results = generate_lipsync_for_shots(\n'
-        .. '        screenplay, provider, video_paths, audio_paths, "' .. safeOutput .. '"\n'
-        .. '    )\n'
-        .. '    print(json.dumps({"status": "ok", "count": len(results)}))\n'
+        .. '    video_map = {}\n'
+        .. '    for v in videos:\n'
+        .. '        sk = _shot_key(v)\n'
+        .. '        if sk: video_map[sk] = v\n'
+        .. '    # Build audio map: prefer merged > dialogue_audio > audio root\n'
+        .. '    audio_map = {}\n'
+        .. '    # First: merged files (highest priority)\n'
+        .. '    for sk, path in merged.items():\n'
+        .. '        audio_map[sk] = path\n'
+        .. '    # Then: individual dialogue_audio files (only if not already merged)\n'
+        .. '    for a in sorted(glob.glob(os.path.join(dialogue_dir, "*.wav")) + glob.glob(os.path.join(dialogue_dir, "*.mp3"))):\n'
+        .. '        sk = _shot_key(a)\n'
+        .. '        if sk and sk not in audio_map: audio_map[sk] = a\n'
+        .. '    # Then: root audio dir\n'
+        .. '    for a in sorted(glob.glob(os.path.join(audio_dir, "*.wav")) + glob.glob(os.path.join(audio_dir, "*.mp3"))):\n'
+        .. '        sk = _shot_key(a)\n'
+        .. '        if sk and sk not in audio_map: audio_map[sk] = a\n'
+        .. '    pairs = []\n'
+        .. '    for sk in sorted(video_map.keys()):\n'
+        .. '        if sk in audio_map:\n'
+        .. '            pairs.append({"shot_key": sk, "video": video_map[sk], "audio": audio_map[sk]})\n'
+        .. '    print(json.dumps({"status": "ok", "pairs": pairs, "video_count": len(video_map), "audio_count": len(audio_map), "merged_count": merge_count}))\n'
         .. 'except Exception as e:\n'
+        .. '    import traceback\n'
         .. '    print(json.dumps({"status": "error", "error": str(e), "trace": traceback.format_exc()}))\n'
 
-    local result = runPython(code)
-    local jsonStr = result and result:match("(%{.+%})")
-    if jsonStr then
-        local data = JSON.decode(jsonStr)
-        if data and data.status == "ok" then
-            itm.LipSyncProgress.Text = "Lip-synced " .. tostring(data.count) .. " clips!"
-            itm.LipSyncProgress.StyleSheet = "color: green; font-weight: bold;"
+    local discResult = runPython(discoverCode)
+    local discJson = discResult and discResult:match("(%{.+%})")
+    if not discJson then
+        itm.LipSyncProgress.Text = "Failed to scan files. Check console."
+        itm.LipSyncProgress.StyleSheet = "color: red;"
+        os.remove(keyfile)
+        return
+    end
+
+    local discData = JSON.decode(discJson)
+    if not discData or discData.status ~= "ok" then
+        itm.LipSyncProgress.Text = "Scan error: " .. (discData and discData.error or "Unknown")
+        itm.LipSyncProgress.StyleSheet = "color: red;"
+        os.remove(keyfile)
+        return
+    end
+
+    local pairs = discData.pairs or {}
+    local mergedCount = discData.merged_count or 0
+    if #pairs == 0 then
+        itm.LipSyncProgress.Text = "No matching video/audio pairs found (videos: " .. tostring(discData.video_count) .. ", audio: " .. tostring(discData.audio_count) .. ")"
+        itm.LipSyncProgress.StyleSheet = "color: orange;"
+        os.remove(keyfile)
+        return
+    end
+
+    if mergedCount > 0 then
+        print("[ScriptToScreen] Merged " .. tostring(mergedCount) .. " shot audio files from individual dialogue lines")
+    end
+
+    -- Step 2: Lip-sync each pair individually using the standalone function
+    -- (same proven approach as STS_Lip_Sync.lua standalone tool)
+    local syncCount = 0
+    local failCount = 0
+    local serverUrl = ""
+    if lsPid == "kling" then
+        serverUrl = config.providers.kling and config.providers.kling.serverUrl or ""
+    end
+
+    for i, pair in ipairs(pairs) do
+        local shotKey = pair.shot_key
+        local vidPath = pair.video:gsub("\\", "\\\\"):gsub('"', '\\"')
+        local audPath = pair.audio:gsub("\\", "\\\\"):gsub('"', '\\"')
+
+        itm.LipSyncProgress.Text = "Lip-syncing " .. shotKey .. " (" .. tostring(i) .. "/" .. tostring(#pairs) .. ")..."
+        itm.LipSyncProgress.StyleSheet = "color: #888;"
+
+        local code = 'import traceback\n'
+            .. 'try:\n'
+            .. '    from script_to_screen.standalone import generate_lipsync_standalone\n'
+            .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
+            .. '    result = generate_lipsync_standalone(\n'
+            .. '        video_path="' .. vidPath .. '",\n'
+            .. '        audio_path="' .. audPath .. '",\n'
+            .. '        provider_id="' .. lsPid .. '",\n'
+            .. '        api_key=api_key,\n'
+            .. '        output_dir="' .. safeOutput .. '",\n'
+            .. '        project_slug="' .. (projectSlug or ""):gsub('"', '\\"') .. '",\n'
+            .. '        server_url="' .. serverUrl:gsub('"', '\\"') .. '",\n'
+            .. '        shot_key="' .. shotKey .. '",\n'
+            .. '    )\n'
+            .. '    print(json.dumps(result))\n'
+            .. 'except Exception as e:\n'
+            .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
+
+        local result = runPython(code)
+        local jsonStr = result and result:match("(%{.+%})")
+        if jsonStr then
+            local data = JSON.decode(jsonStr)
+            if data and data.status == "ok" then
+                syncCount = syncCount + 1
+                print("[ScriptToScreen] Lip-synced " .. shotKey .. " → " .. (data.filename or ""))
+            else
+                failCount = failCount + 1
+                print("[ScriptToScreen] Lip-sync FAILED for " .. shotKey .. ": " .. (data and data.error or "unknown"))
+                if data and data.trace then print(data.trace) end
+            end
         else
-            itm.LipSyncProgress.Text = "Error: " .. (data and data.error or "Unknown")
-            itm.LipSyncProgress.StyleSheet = "color: red;"
+            failCount = failCount + 1
+            print("[ScriptToScreen] Lip-sync FAILED for " .. shotKey .. ": no output")
+            if result then print(result) end
         end
+    end
+
+    os.remove(keyfile)
+
+    if syncCount > 0 then
+        local msg = "Lip-synced " .. tostring(syncCount) .. " of " .. tostring(#pairs) .. " clips!"
+        if failCount > 0 then
+            msg = msg .. " (" .. tostring(failCount) .. " failed)"
+        end
+        itm.LipSyncProgress.Text = msg
+        itm.LipSyncProgress.StyleSheet = "color: green; font-weight: bold;"
     else
-        itm.LipSyncProgress.Text = "Failed. Check console."
+        itm.LipSyncProgress.Text = "All " .. tostring(#pairs) .. " clips failed. Check console."
         itm.LipSyncProgress.StyleSheet = "color: red;"
     end
 end
@@ -2370,8 +2467,8 @@ function win.On.AssembleBtn.Clicked(ev)
     local audioDir = outputDir .. "/audio"
 
     local imageFiles = {}
-    local videoFiles = {}
-    local audioFiles = {}
+    local videoFileList = {}
+    local audioFileList = {}
 
     local function collectFiles(dir, ext, targetTable)
         local handle = io.popen('ls -1 "' .. dir .. '"/' .. ext .. ' 2>/dev/null | sort')
@@ -2390,28 +2487,71 @@ function win.On.AssembleBtn.Clicked(ev)
     collectFiles(imageDir, "*.jpg", imageFiles)
     collectFiles(imageDir, "*.jpeg", imageFiles)
 
-    -- Collect videos (prefer lipsync, fall back to videos)
-    collectFiles(lipsyncDir, "*.mp4", videoFiles)
-    if #videoFiles == 0 then
-        collectFiles(videoDir, "*.mp4", videoFiles)
-    end
+    -- Collect ALL original videos first, then overlay with lip-synced versions
+    local origVideoFiles = {}
+    local lipsyncVideoFiles = {}
+    collectFiles(videoDir, "*.mp4", origVideoFiles)
+    collectFiles(lipsyncDir, "*.mp4", lipsyncVideoFiles)
 
-    -- Collect audio (check both the dialogue_audio subdirectory and the main audio dir)
+    -- Collect audio: prefer merged > dialogue_audio > audio root
+    local mergedAudioDir = audioDir .. "/merged"
     local dialogueAudioDir = audioDir .. "/dialogue_audio"
-    collectFiles(dialogueAudioDir, "*.wav", audioFiles)
-    collectFiles(dialogueAudioDir, "*.mp3", audioFiles)
-    collectFiles(audioDir, "*.wav", audioFiles)
-    collectFiles(audioDir, "*.mp3", audioFiles)
+    collectFiles(mergedAudioDir, "*.wav", audioFileList)
+    collectFiles(mergedAudioDir, "*.mp3", audioFileList)
+    collectFiles(dialogueAudioDir, "*.wav", audioFileList)
+    collectFiles(dialogueAudioDir, "*.mp3", audioFileList)
+    collectFiles(audioDir, "*.wav", audioFileList)
+    collectFiles(audioDir, "*.mp3", audioFileList)
 
-    if #videoFiles == 0 and #imageFiles == 0 then
+    if #origVideoFiles == 0 and #lipsyncVideoFiles == 0 and #imageFiles == 0 then
         itm.AssemblyProgress.Text = "No media files found to assemble."
         itm.AssemblyProgress.StyleSheet = "color: red;"
         return
     end
 
+    -- ---------------------------------------------------------------
+    -- Build shot-key-indexed maps for video and audio files
+    -- ---------------------------------------------------------------
+    local function extractShotKey(filepath)
+        local basename = filepath:match("([^/]+)$") or ""
+        local key = basename:match("(s%d+_sh%d+)")
+        return key
+    end
+
+    -- Map shot_key -> video: start with originals, then overlay lip-synced
+    local videoByKey = {}
+    for _, vf in ipairs(origVideoFiles) do
+        local sk = extractShotKey(vf)
+        if sk then videoByKey[sk] = vf end
+    end
+    -- Lip-synced versions override originals where available
+    local lipsyncedKeys = {}  -- track which shots have lip-synced video (with embedded audio)
+    for _, vf in ipairs(lipsyncVideoFiles) do
+        local sk = extractShotKey(vf)
+        if sk then
+            videoByKey[sk] = vf
+            lipsyncedKeys[sk] = true
+        end
+    end
+
+    -- Map shot_key -> audio file path (first match wins — merged has priority
+    -- because merged files are collected first above)
+    local audioByKey = {}
+    for _, af in ipairs(audioFileList) do
+        local sk = extractShotKey(af)
+        if sk and not audioByKey[sk] then
+            audioByKey[sk] = af
+        end
+    end
+
+    -- Build ordered shot key list from ALL videos (sorted)
+    local orderedKeys = {}
+    for sk, _ in pairs(videoByKey) do
+        table.insert(orderedKeys, sk)
+    end
+    table.sort(orderedKeys)
+
     -- Import images to "ScriptToScreen/Images" sub-bin
-    -- NOTE: Import one-at-a-time to prevent Resolve from detecting them as
-    -- an image sequence (s0_sh0.png, s0_sh1.png → "s0_sh[0-N].png").
     local importedImages = {}
     if #imageFiles > 0 then
         local imgBin = nil
@@ -2428,40 +2568,43 @@ function win.On.AssembleBtn.Clicked(ev)
         if imgBin then
             mediaPool:SetCurrentFolder(imgBin)
         end
-        -- Import each image individually to avoid sequence detection
         for _, imgPath in ipairs(imageFiles) do
             local items = mediaPool:ImportMedia({imgPath}) or {}
             for _, item in ipairs(items) do
                 table.insert(importedImages, item)
             end
         end
-        -- Return to main STS bin
         if stsBin then
             mediaPool:SetCurrentFolder(stsBin)
         end
     end
 
-    -- Import videos to ScriptToScreen bin (separate from audio)
-    local importedVideoClips = {}
-    if #videoFiles > 0 then
-        importedVideoClips = mediaPool:ImportMedia(videoFiles) or {}
+    -- ---------------------------------------------------------------
+    -- Import video and audio files, mapping by shot key
+    -- ---------------------------------------------------------------
+    -- Import each video individually so we can track which item is which
+    local videoItemByKey = {}
+    for _, sk in ipairs(orderedKeys) do
+        local vpath = videoByKey[sk]
+        local items = mediaPool:ImportMedia({vpath}) or {}
+        if #items > 0 then
+            videoItemByKey[sk] = items[1]
+        end
     end
 
-    -- Import audio to ScriptToScreen bin
-    local importedAudioClips = {}
-    if #audioFiles > 0 then
-        importedAudioClips = mediaPool:ImportMedia(audioFiles) or {}
+    -- Import each audio individually
+    local audioItemByKey = {}
+    for sk, apath in pairs(audioByKey) do
+        local items = mediaPool:ImportMedia({apath}) or {}
+        if #items > 0 then
+            audioItemByKey[sk] = items[1]
+        end
     end
 
-    local totalImported = #importedImages + #importedVideoClips + #importedAudioClips
-    -- For timeline appending, use video clips only (audio added to audio track separately)
-    local importedClips = importedVideoClips
-
-    -- Create timeline — use a unique name if the default already exists
+    -- Create timeline
     local actualTimelineName = timelineName
     local timeline = mediaPool:CreateEmptyTimeline(actualTimelineName)
     if not timeline then
-        -- Timeline name likely exists; append timestamp to make unique
         local ts = os.date("%Y%m%d_%H%M%S")
         actualTimelineName = timelineName .. " " .. ts
         timeline = mediaPool:CreateEmptyTimeline(actualTimelineName)
@@ -2475,37 +2618,53 @@ function win.On.AssembleBtn.Clicked(ev)
 
     project:SetCurrentTimeline(timeline)
 
-    -- Append clips to timeline (wrapped in pcall for safety)
+    -- ---------------------------------------------------------------
+    -- Append clips in shot-key order
+    -- Lip-synced clips: full video+audio (Kling bakes audio into the MP4)
+    -- Non-dialogue clips: video only (no embedded audio to include)
+    -- Standalone merged audio files stay in the bin for reference
+    -- ---------------------------------------------------------------
     local appendCount = 0
+    local lipsyncAppendCount = 0
     local appendOk, appendErr = pcall(function()
-        if #importedClips > 0 then
-            -- Try appending all clips at once (more reliable)
-            local result = mediaPool:AppendToTimeline(importedClips)
-            if result and #result > 0 then
-                appendCount = #result
-            else
-                -- Fallback: append one at a time
-                for _, clip in ipairs(importedClips) do
-                    if clip then
-                        local ok = mediaPool:AppendToTimeline({clip})
-                        if ok and #ok > 0 then appendCount = appendCount + 1 end
+        for _, sk in ipairs(orderedKeys) do
+            local videoItem = videoItemByKey[sk]
+
+            if videoItem then
+                if lipsyncedKeys[sk] then
+                    -- Lip-synced clip: append with BOTH video and audio
+                    -- (Kling already embedded the dialogue audio into the MP4)
+                    local vResult = mediaPool:AppendToTimeline({videoItem})
+                    if vResult and #vResult > 0 then
+                        appendCount = appendCount + 1
+                        lipsyncAppendCount = lipsyncAppendCount + 1
+                    end
+                else
+                    -- Non-dialogue clip: append video only
+                    local vResult = mediaPool:AppendToTimeline({{
+                        mediaPoolItem = videoItem,
+                        mediaType = 1,
+                        trackIndex = 1,
+                    }})
+                    if vResult and #vResult > 0 then
+                        appendCount = appendCount + 1
                     end
                 end
             end
         end
 
-        -- If nothing was appended (clips already in pool from prior import),
-        -- re-import to a fresh sub-bin to get new media pool items
-        if appendCount == 0 and #videoFiles > 0 then
-            local freshBin = mediaPool:AddSubFolder(stsBin, "Assembly_" .. os.date("%H%M%S"))
-            if freshBin then
-                mediaPool:SetCurrentFolder(freshBin)
-                local freshClips = mediaPool:ImportMedia(videoFiles) or {}
-                if #freshClips > 0 then
-                    local result = mediaPool:AppendToTimeline(freshClips)
-                    if result and #result > 0 then
-                        appendCount = #result
-                    end
+        -- Fallback: if dict-style append failed, try simple append
+        if appendCount == 0 and #orderedKeys > 0 then
+            local allVideoItems = {}
+            for _, sk in ipairs(orderedKeys) do
+                if videoItemByKey[sk] then
+                    table.insert(allVideoItems, videoItemByKey[sk])
+                end
+            end
+            if #allVideoItems > 0 then
+                local result = mediaPool:AppendToTimeline(allVideoItems)
+                if result and #result > 0 then
+                    appendCount = #result
                 end
             end
         end
@@ -2515,15 +2674,16 @@ function win.On.AssembleBtn.Clicked(ev)
         itm.AssemblyProgress.StyleSheet = "color: orange;"
     end
 
-    itm.AssemblyProgress.Text = "Timeline '" .. actualTimelineName .. "' created with " .. tostring(appendCount) .. " clips!"
+    itm.AssemblyProgress.Text = "Timeline '" .. actualTimelineName .. "' created with " .. tostring(appendCount) .. " clips (" .. tostring(lipsyncAppendCount) .. " lip-synced)!"
     itm.AssemblyProgress.StyleSheet = "color: green; font-weight: bold;"
 
     -- Update summary
     local summary = "Timeline: " .. actualTimelineName .. "\n"
         .. "Image files in bin: " .. tostring(#imageFiles) .. "\n"
-        .. "Video clips: " .. tostring(#videoFiles) .. "\n"
-        .. "Audio clips: " .. tostring(#audioFiles) .. "\n"
-        .. "Clips on timeline: " .. tostring(appendCount)
+        .. "Total clips: " .. tostring(appendCount) .. "\n"
+        .. "Lip-synced (with dialogue): " .. tostring(lipsyncAppendCount) .. "\n"
+        .. "Video-only (no dialogue): " .. tostring(appendCount - lipsyncAppendCount) .. "\n"
+        .. "Total shot keys: " .. tostring(#orderedKeys)
     itm.AssemblySummary.PlainText = summary
 end
 

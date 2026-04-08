@@ -74,6 +74,26 @@ def reframe_image(
         output_dir = os.path.dirname(image_path)
     os.makedirs(output_dir, exist_ok=True)
 
+    # Read input image dimensions to preserve aspect ratio
+    out_width, out_height = 1024, 1024  # fallback
+    try:
+        from PIL import Image as _PILImg
+        with _PILImg.open(image_path) as _img:
+            src_w, src_h = _img.size
+        # Scale so the largest dimension is 1024, preserving aspect ratio
+        if src_w >= src_h:
+            out_width = 1024
+            out_height = max(64, round(1024 * src_h / src_w))
+        else:
+            out_height = 1024
+            out_width = max(64, round(1024 * src_w / src_h))
+        # Round to nearest multiple of 8 (model requirement)
+        out_width = (out_width // 8) * 8
+        out_height = (out_height // 8) * 8
+    except Exception:
+        # If we can't read dimensions, default to 16:9
+        out_width, out_height = 1024, 576
+
     try:
         client = Client(SPACE_ID)
         result = client.predict(
@@ -85,8 +105,8 @@ def reframe_image(
             randomize_seed=randomize_seed,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
-            height=1024,
-            width=1024,
+            height=out_height,
+            width=out_width,
             api_name="/infer_camera_edit",
         )
     except Exception as e:

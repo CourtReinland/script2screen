@@ -1,0 +1,43 @@
+#!/bin/bash
+# ============================================================================
+# ScriptToScreen Uninstaller for macOS
+# ============================================================================
+
+set -euo pipefail
+
+RESOLVE_UTILITY="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+RESOLVE_EDIT="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
+USER_PKG_DIR="$HOME/Library/Application Support/ScriptToScreen"
+
+install_with_privileges() {
+    osascript -e "do shell script \"$1\" with administrator privileges" 2>/dev/null
+}
+
+# Confirm
+osascript -e '
+display dialog "This will remove ScriptToScreen from DaVinci Resolve.\n\nThe following will be deleted:\n  \u2022 Lua scripts from Resolve\n  \u2022 Python packages and virtual environments\n  \u2022 Configuration files\n\nYour generated media (images, videos, audio) in the projects folder will be PRESERVED.\n\nContinue?" with title "Uninstall ScriptToScreen" buttons {"Cancel", "Uninstall"} default button "Cancel" with icon caution
+' 2>/dev/null || exit 0
+
+echo "Removing ScriptToScreen..."
+
+# Remove Lua scripts from Resolve
+install_with_privileges "rm -f '$RESOLVE_UTILITY/ScriptToScreen.lua' '$RESOLVE_UTILITY/ScriptToScreen.py'" || true
+for script in STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua STS_Toolbar.lua STS_ExpandShots.lua; do
+    install_with_privileges "rm -f '$RESOLVE_EDIT/$script'" || true
+done
+install_with_privileges "rm -rf '$RESOLVE_UTILITY/script_to_screen'" || true
+
+# Remove Python package and venvs (but NOT projects/)
+rm -rf "$USER_PKG_DIR/script_to_screen" 2>/dev/null || true
+rm -rf "$USER_PKG_DIR/venv" 2>/dev/null || true
+rm -rf "$USER_PKG_DIR/mlx-venv" 2>/dev/null || true
+rm -f "$USER_PKG_DIR/config.json" 2>/dev/null || true
+
+# Remove config dir
+rm -rf "$HOME/.config/script_to_screen" 2>/dev/null || true
+
+osascript -e '
+display dialog "ScriptToScreen has been removed.\n\nYour project files (images, videos, audio) are still at:\n'"$USER_PKG_DIR/projects/"'" with title "Uninstall Complete" buttons {"OK"} default button "OK" with icon note
+' 2>/dev/null
+
+echo "Uninstall complete."
