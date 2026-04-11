@@ -1,252 +1,267 @@
 #!/bin/bash
 # ============================================================================
-# Build ScriptToScreen macOS Installer (.app + .dmg)
+# Build ScriptToScreen macOS Installer (.pkg inside .dmg)
 #
-# Usage: ./build_installer.sh [--version 1.0.0]
+# Uses macOS native `pkgbuild` + `productbuild` to create a proper .pkg
+# installer. This avoids ALL the Gatekeeper/osascript issues that broke
+# the previous .app-based approach.
 #
-# Creates:
-#   build/Install ScriptToScreen.app
-#   build/Uninstall ScriptToScreen.app
-#   dist/ScriptToScreen-Installer-{version}.dmg
+# The .pkg installer:
+#   - Copies Lua scripts to /Library/.../DaVinci Resolve/Fusion/Scripts/
+#   - Copies Python package to ~/Library/Application Support/ScriptToScreen/
+#   - Runs a postinstall script for Homebrew/Python/venv/pip setup
+#
+# Usage: ./build_installer.sh [VERSION]
+#   e.g.: ./build_installer.sh 1.1.0
 # ============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="${1:-1.0.0}"
-VERSION="${VERSION#--version }"
+VERSION="${1:-1.1.0}"
 
 BUILD_DIR="$PROJECT_DIR/build"
 DIST_DIR="$PROJECT_DIR/dist"
-APP_NAME="Install ScriptToScreen"
-UNINSTALL_APP_NAME="Uninstall ScriptToScreen"
-DMG_NAME="ScriptToScreen-Installer-${VERSION}"
+PKG_ID="com.scripttoscreensts.pkg"
 
 echo "============================================"
 echo " Building ScriptToScreen Installer v$VERSION"
+echo " Format: .pkg (native macOS installer)"
 echo "============================================"
 echo ""
 
 # Clean previous build
-rm -rf "$BUILD_DIR" "$DIST_DIR"
+rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$DIST_DIR"
 
 # ============================================================================
-# Build the Installer .app
+# Stage 1: Prepare payload directories
 # ============================================================================
 
-echo "[1/5] Creating installer .app bundle..."
+echo "[1/5] Staging payload..."
 
-APP_DIR="$BUILD_DIR/$APP_NAME.app"
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources/payload"
+# Payload A: Resolve system scripts (/Library/...)
+RESOLVE_ROOT="$BUILD_DIR/payload-resolve"
+UTIL_DIR="$RESOLVE_ROOT/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+EDIT_DIR="$RESOLVE_ROOT/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
 
-# Copy Info.plist (update version)
-sed "s/1.0.0/$VERSION/g" "$SCRIPT_DIR/Info.plist" > "$APP_DIR/Contents/Info.plist"
+mkdir -p "$UTIL_DIR" "$EDIT_DIR"
 
-# Copy installer script
-cp "$SCRIPT_DIR/install" "$APP_DIR/Contents/MacOS/install"
-chmod +x "$APP_DIR/Contents/MacOS/install"
-
-# Copy MLX requirements
-cp "$SCRIPT_DIR/requirements-mlx.txt" "$APP_DIR/Contents/Resources/"
-
-# ── Copy payload (source files) ──
-echo "[2/5] Copying payload files..."
-
-# Main Lua scripts
-cp "$PROJECT_DIR/ScriptToScreen.lua" "$APP_DIR/Contents/Resources/payload/"
-cp "$PROJECT_DIR/ScriptToScreen.py" "$APP_DIR/Contents/Resources/payload/" 2>/dev/null || true
+# Main wizard
+cp "$PROJECT_DIR/ScriptToScreen.lua" "$UTIL_DIR/"
+cp "$PROJECT_DIR/ScriptToScreen.py" "$UTIL_DIR/" 2>/dev/null || true
 
 # Standalone tools
 for script in STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua \
               STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua \
               STS_ScriptRef.lua STS_Toolbar.lua STS_ExpandShots.lua; do
     if [ -f "$PROJECT_DIR/$script" ]; then
-        cp "$PROJECT_DIR/$script" "$APP_DIR/Contents/Resources/payload/"
+        cp "$PROJECT_DIR/$script" "$EDIT_DIR/"
     fi
 done
 
-# Python package
-cp -r "$PROJECT_DIR/script_to_screen" "$APP_DIR/Contents/Resources/payload/"
-# Clean __pycache__
-find "$APP_DIR/Contents/Resources/payload/script_to_screen" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+# Python package also in Utility dir (some plugins look here)
+cp -r "$PROJECT_DIR/script_to_screen" "$UTIL_DIR/"
+find "$UTIL_DIR/script_to_screen" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-# Requirements
-cp "$PROJECT_DIR/requirements.txt" "$APP_DIR/Contents/Resources/payload/" 2>/dev/null || true
+# Payload B: User-space files (~/ via postinstall, but we stage for reference)
+USER_ROOT="$BUILD_DIR/payload-user"
+USER_STS_DIR="$USER_ROOT/Library/Application Support/ScriptToScreen"
+mkdir -p "$USER_STS_DIR"
 
-# ── Generate app icon ──
-echo "[3/5] Generating app icon..."
+# Python package for user dir
+cp -r "$PROJECT_DIR/script_to_screen" "$USER_STS_DIR/"
+find "$USER_STS_DIR/script_to_screen" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-# Create a simple icon using Python/Pillow or sips
-ICON_DIR="$APP_DIR/Contents/Resources/AppIcon.iconset"
-mkdir -p "$ICON_DIR"
-
-# Generate icon PNGs using Python
-python3 -c "
-from PIL import Image, ImageDraw, ImageFont
-import os
-
-sizes = [16, 32, 64, 128, 256, 512, 1024]
-icon_dir = '$ICON_DIR'
-
-for size in sizes:
-    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    # Background: dark rounded rectangle
-    margin = max(1, size // 16)
-    r = max(2, size // 5)
-    draw.rounded_rectangle([margin, margin, size-margin, size-margin], radius=r, fill=(30, 30, 40, 255))
-
-    # Film strip bars
-    bar_h = max(1, size // 8)
-    draw.rectangle([margin, margin, size-margin, margin + bar_h], fill=(60, 60, 80, 255))
-    draw.rectangle([margin, size-margin-bar_h, size-margin, size-margin], fill=(60, 60, 80, 255))
-
-    # Sprocket holes
-    hole_size = max(1, size // 20)
-    for i in range(4):
-        x = margin + (size - 2*margin) * (i + 0.5) / 4
-        draw.ellipse([x-hole_size, margin+bar_h//4-hole_size, x+hole_size, margin+bar_h//4+hole_size], fill=(30, 30, 40, 255))
-        draw.ellipse([x-hole_size, size-margin-bar_h//4-hole_size, x+hole_size, size-margin-bar_h//4+hole_size], fill=(30, 30, 40, 255))
-
-    # Center text
-    if size >= 64:
-        fs = max(8, size // 6)
-        try:
-            font = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', fs)
-        except:
-            font = ImageFont.load_default()
-        text = 'STS'
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text(((size-tw)//2, (size-th)//2 - size//20), text, fill=(120, 200, 255, 255), font=font)
-
-        # Subtitle
-        if size >= 128:
-            fs2 = max(6, size // 14)
-            try:
-                font2 = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', fs2)
-            except:
-                font2 = ImageFont.load_default()
-            sub = 'AI Film'
-            bbox2 = draw.textbbox((0, 0), sub, font=font2)
-            sw = bbox2[2] - bbox2[0]
-            draw.text(((size-sw)//2, (size+th)//2 + size//20), sub, fill=(180, 180, 200, 255), font=font2)
-
-    # Save at both 1x and 2x
-    img.save(os.path.join(icon_dir, f'icon_{size}x{size}.png'))
-    if size <= 512:
-        img.save(os.path.join(icon_dir, f'icon_{size//2}x{size//2}@2x.png'))
-" 2>/dev/null || {
-    echo "  Warning: Could not generate icon (Pillow not available). Using placeholder."
-    # Create minimal placeholder icons
-    for size in 16 32 128 256 512; do
-        sips -z $size $size /System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns --out "$ICON_DIR/icon_${size}x${size}.png" 2>/dev/null || true
-    done
-}
-
-# Convert iconset to icns
-iconutil -c icns "$ICON_DIR" -o "$APP_DIR/Contents/Resources/AppIcon.icns" 2>/dev/null || {
-    echo "  Warning: Could not create icns file"
-}
-rm -rf "$ICON_DIR"
+echo "  Payload staged:"
+echo "    Utility scripts: $(ls "$UTIL_DIR"/*.lua 2>/dev/null | wc -l | tr -d ' ') files"
+echo "    Edit scripts: $(ls "$EDIT_DIR"/*.lua 2>/dev/null | wc -l | tr -d ' ') files"
 
 # ============================================================================
-# Build the Uninstaller .app
+# Stage 2: Prepare scripts directory for the pkg
 # ============================================================================
 
-echo "[4/5] Creating uninstaller .app..."
+echo "[2/5] Preparing install scripts..."
 
-UNINSTALL_DIR="$BUILD_DIR/$UNINSTALL_APP_NAME.app"
-mkdir -p "$UNINSTALL_DIR/Contents/MacOS"
-mkdir -p "$UNINSTALL_DIR/Contents/Resources"
+SCRIPTS_DIR="$BUILD_DIR/scripts"
+mkdir -p "$SCRIPTS_DIR"
 
-# Uninstaller Info.plist
-cat > "$UNINSTALL_DIR/Contents/Info.plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>Uninstall ScriptToScreen</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.scripttoscreensts.uninstaller</string>
-    <key>CFBundleVersion</key>
-    <string>1.0.0</string>
-    <key>CFBundleExecutable</key>
-    <string>uninstall</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLIST
-
-cp "$SCRIPT_DIR/uninstall" "$UNINSTALL_DIR/Contents/MacOS/uninstall"
-chmod +x "$UNINSTALL_DIR/Contents/MacOS/uninstall"
+cp "$SCRIPT_DIR/postinstall" "$SCRIPTS_DIR/postinstall"
+chmod +x "$SCRIPTS_DIR/postinstall"
 
 # ============================================================================
-# Build DMG
+# Stage 3: Build component .pkg files
+# ============================================================================
+
+echo "[3/5] Building component packages..."
+
+# Component A: Resolve system scripts (installs to /Library/)
+pkgbuild \
+    --root "$RESOLVE_ROOT" \
+    --identifier "${PKG_ID}.resolve-scripts" \
+    --version "$VERSION" \
+    --scripts "$SCRIPTS_DIR" \
+    --install-location "/" \
+    "$BUILD_DIR/resolve-scripts.pkg"
+
+# Component B: User-space Python package (installs to ~/Library/)
+pkgbuild \
+    --root "$USER_ROOT" \
+    --identifier "${PKG_ID}.user-package" \
+    --version "$VERSION" \
+    --install-location "$HOME" \
+    "$BUILD_DIR/user-package.pkg"
+
+# ============================================================================
+# Stage 4: Create distribution.xml for productbuild
+# ============================================================================
+
+echo "[4/5] Building product installer..."
+
+cat > "$BUILD_DIR/distribution.xml" <<DISTXML
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>ScriptToScreen v${VERSION}</title>
+    <welcome>
+        <html-content><![CDATA[
+<html><body style="font-family: -apple-system, Helvetica; padding: 20px;">
+<h2>ScriptToScreen v${VERSION}</h2>
+<p>AI Filmmaking Plugin for DaVinci Resolve</p>
+<p>This installer will set up:</p>
+<ul>
+<li><b>ScriptToScreen wizard</b> + all standalone tools in DaVinci Resolve</li>
+<li><b>Python virtual environment</b> with AI packages</li>
+<li><b>MLX-Audio</b> for local voice synthesis (Apple Silicon)</li>
+<li><b>Homebrew</b> and <b>ffmpeg</b> if not already installed</li>
+</ul>
+<p style="color: #666; font-size: 0.9em;">
+After installation, restart DaVinci Resolve and go to<br/>
+<b>Workspace &rarr; Scripts &rarr; ScriptToScreen</b>
+</p>
+<p style="color: #666; font-size: 0.85em;">
+Install log: ~/Library/Logs/ScriptToScreen/install.log
+</p>
+</body></html>
+        ]]></html-content>
+    </welcome>
+    <conclusion>
+        <html-content><![CDATA[
+<html><body style="font-family: -apple-system, Helvetica; padding: 20px;">
+<h2>Installation Complete!</h2>
+<p><b>Next steps:</b></p>
+<ol>
+<li>Restart DaVinci Resolve</li>
+<li>Go to <b>Workspace &rarr; Scripts &rarr; ScriptToScreen</b></li>
+<li>Configure your API keys in the wizard's Step 1:
+    <ul>
+    <li>Grok (xAI) &mdash; <a href="https://x.ai">x.ai</a></li>
+    <li>ElevenLabs &mdash; <a href="https://elevenlabs.io">elevenlabs.io</a></li>
+    <li>Kling AI &mdash; <a href="https://klingai.com">klingai.com</a></li>
+    </ul>
+</li>
+</ol>
+<p style="color: #666; font-size: 0.85em;">
+If something didn't work, check the log at:<br/>
+~/Library/Logs/ScriptToScreen/install.log
+</p>
+</body></html>
+        ]]></html-content>
+    </conclusion>
+    <options customize="never" require-scripts="false"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="resolve-scripts"/>
+            <line choice="user-package"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="resolve-scripts" visible="false">
+        <pkg-ref id="${PKG_ID}.resolve-scripts"/>
+    </choice>
+    <choice id="user-package" visible="false">
+        <pkg-ref id="${PKG_ID}.user-package"/>
+    </choice>
+    <pkg-ref id="${PKG_ID}.resolve-scripts" version="${VERSION}" onConclusion="none">resolve-scripts.pkg</pkg-ref>
+    <pkg-ref id="${PKG_ID}.user-package" version="${VERSION}" onConclusion="none">user-package.pkg</pkg-ref>
+</installer-gui-script>
+DISTXML
+
+# Build the final product .pkg
+FINAL_PKG="$DIST_DIR/ScriptToScreen-${VERSION}.pkg"
+productbuild \
+    --distribution "$BUILD_DIR/distribution.xml" \
+    --package-path "$BUILD_DIR" \
+    --version "$VERSION" \
+    "$FINAL_PKG"
+
+echo "  Product package: $FINAL_PKG"
+
+# ============================================================================
+# Stage 5: Create DMG containing the .pkg + README + uninstaller
 # ============================================================================
 
 echo "[5/5] Building DMG..."
 
-DMG_TEMP="$BUILD_DIR/dmg_staging"
-mkdir -p "$DMG_TEMP"
-cp -r "$APP_DIR" "$DMG_TEMP/"
-cp -r "$UNINSTALL_DIR" "$DMG_TEMP/"
+DMG_STAGING="$BUILD_DIR/dmg_staging"
+mkdir -p "$DMG_STAGING"
 
-# Add a README
-cat > "$DMG_TEMP/README.txt" << 'README'
-ScriptToScreen — AI Filmmaking Plugin for DaVinci Resolve
+cp "$FINAL_PKG" "$DMG_STAGING/"
 
-INSTALLATION:
-  Double-click "Install ScriptToScreen" to begin.
+# Uninstaller (simple .app wrapper around the uninstall script)
+UNINSTALL_APP="$DMG_STAGING/Uninstall ScriptToScreen.app"
+mkdir -p "$UNINSTALL_APP/Contents/MacOS"
+cat > "$UNINSTALL_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleName</key><string>Uninstall ScriptToScreen</string>
+    <key>CFBundleIdentifier</key><string>com.scripttoscreensts.uninstaller</string>
+    <key>CFBundleVersion</key><string>1.0</string>
+    <key>CFBundleExecutable</key><string>uninstall</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+PLIST
+cp "$SCRIPT_DIR/uninstall" "$UNINSTALL_APP/Contents/MacOS/uninstall"
+chmod +x "$UNINSTALL_APP/Contents/MacOS/uninstall"
 
-AFTER INSTALLATION:
+# README
+cat > "$DMG_STAGING/README.txt" <<README
+ScriptToScreen v${VERSION} — AI Filmmaking Plugin for DaVinci Resolve
+
+INSTALL:
+  Double-click "ScriptToScreen-${VERSION}.pkg"
+
+AFTER INSTALL:
   1. Restart DaVinci Resolve
-  2. Go to Workspace > Scripts > ScriptToScreen
-  3. Configure your API keys in the wizard's Step 1
+  2. Workspace > Scripts > ScriptToScreen
+  3. Configure API keys in the wizard
 
 UNINSTALL:
-  Double-click "Uninstall ScriptToScreen" to remove.
+  Double-click "Uninstall ScriptToScreen"
+  (Your project files are preserved)
 
-For support, visit: https://github.com/scripttoscreensts
+TROUBLESHOOTING:
+  Check ~/Library/Logs/ScriptToScreen/install.log
 README
 
-# Create DMG
-DMG_PATH="$DIST_DIR/${DMG_NAME}.dmg"
+DMG_PATH="$DIST_DIR/ScriptToScreen-Installer-${VERSION}.dmg"
 hdiutil create \
-    -volname "ScriptToScreen Installer" \
-    -srcfolder "$DMG_TEMP" \
+    -volname "ScriptToScreen ${VERSION}" \
+    -srcfolder "$DMG_STAGING" \
     -ov \
     -format UDZO \
-    "$DMG_PATH" 2>/dev/null || {
-    # Fallback: create uncompressed DMG
-    hdiutil create \
-        -volname "ScriptToScreen Installer" \
-        -srcfolder "$DMG_TEMP" \
-        -ov \
-        -format UDRW \
-        "$DMG_PATH"
-}
+    "$DMG_PATH"
 
 # Clean up staging
-rm -rf "$DMG_TEMP"
+rm -rf "$DMG_STAGING"
 
 echo ""
 echo "============================================"
 echo " Build complete!"
 echo "============================================"
 echo ""
-echo " Installer app:  $APP_DIR"
-echo " Uninstaller app: $UNINSTALL_DIR"
+echo " .pkg installer: $FINAL_PKG"
 echo " DMG:            $DMG_PATH"
 echo " Size:           $(du -h "$DMG_PATH" | cut -f1)"
 echo ""
