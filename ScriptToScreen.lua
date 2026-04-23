@@ -410,6 +410,10 @@ end
 -- Load saved config
 local configDir = homeDir .. "/Library/Application Support/ScriptToScreen"
 local configPath = configDir .. "/config.json"
+-- Global character library: persists character reference images across projects.
+-- Keyed by normalized (uppercase, trimmed) character name so recurring
+-- characters in episodic shows auto-populate their ref image.
+local charLibraryPath = configDir .. "/character_library.json"
 do
     local f = io.open(configPath, "r")
     if f then
@@ -474,6 +478,101 @@ local function saveConfig()
         f:close()
     end
 end
+
+-- ============================================================
+-- GLOBAL CHARACTER LIBRARY (recurring character refs across projects)
+-- ============================================================
+
+-- In-memory mirror of character_library.json. Keyed by normalized name.
+-- Schema per entry: {reference_image_path=..., last_updated=..., source_project=...}
+local characterLibrary = {}
+
+-- Normalize a character name so "Aiden", "AIDEN ", and "aiden" all map
+-- to the same library key.
+local function normCharName(name)
+    if type(name) ~= "string" then return "" end
+    local n = name:gsub("^%s+", ""):gsub("%s+$", "")
+    return n:upper()
+end
+
+local function loadCharacterLibrary()
+    characterLibrary = {}
+    local f = io.open(charLibraryPath, "r")
+    if not f then return end
+    local raw = f:read("*a")
+    f:close()
+    if not raw or raw == "" then return end
+
+    local ok, parsed = pcall(JSON.decode, raw)
+    if not ok or type(parsed) ~= "table" then
+        print("[ScriptToScreen] Character library parse failed; starting fresh")
+        return
+    end
+    local chars = parsed.characters
+    if type(chars) == "table" then
+        for name, entry in pairs(chars) do
+            if type(entry) == "table" and type(entry.reference_image_path) == "string" then
+                characterLibrary[normCharName(name)] = {
+                    display_name = entry.display_name or name,
+                    reference_image_path = entry.reference_image_path,
+                    last_updated = entry.last_updated or "",
+                    source_project = entry.source_project or "",
+                }
+            end
+        end
+    end
+end
+
+local function saveCharacterLibrary()
+    os.execute('mkdir -p "' .. configDir .. '"')
+    local out = {
+        version = 1,
+        characters = {},
+    }
+    for key, entry in pairs(characterLibrary) do
+        out.characters[key] = entry
+    end
+    local f = io.open(charLibraryPath, "w")
+    if f then
+        f:write(JSON.encode(out))
+        f:close()
+    end
+end
+
+-- Upsert a character into the library. Called when the user picks or
+-- changes a reference image in Step 3.
+local function updateCharacterLibrary(name, imagePath)
+    if not name or name == "" then return end
+    local key = normCharName(name)
+    local proj = (config.episodeTitle or "") .. (config.episodeNumber ~= "" and (" " .. config.episodeNumber) or "")
+    characterLibrary[key] = {
+        display_name = name,
+        reference_image_path = imagePath,
+        last_updated = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        source_project = proj,
+    }
+    saveCharacterLibrary()
+end
+
+-- Look up a character's reference image. Returns (path, entry) or (nil, nil).
+-- If the stored file no longer exists, returns nil so we don't populate
+-- stale paths.
+local function lookupCharacterLibrary(name)
+    local key = normCharName(name)
+    local entry = characterLibrary[key]
+    if not entry then return nil, nil end
+    local p = entry.reference_image_path
+    if not p or p == "" then return nil, nil end
+    local f = io.open(p, "r")
+    if f then
+        f:close()
+        return p, entry
+    end
+    -- File missing — keep the entry but return nil so the UI shows (none)
+    return nil, entry
+end
+
+loadCharacterLibrary()
 
 -- ============================================================
 -- MAIN WIZARD WINDOW
@@ -1428,12 +1527,40 @@ function populateCharacterTree(data)
     itm.CharTree.ColumnWidth[2] = 300
 
     itm.CharTree:Clear()
+    local libraryHits = 0
     for name, info in pairs(data.characters) do
         local item = itm.CharTree:NewItem()
         item.Text[0] = name
         item.Text[1] = tostring(info.lines)
-        item.Text[2] = characterImages[name] or "(none)"
+
+        -- If the user hasn't set a ref image for this character yet in
+        -- this project, try the global library for recurring characters.
+        if not characterImages[name] or characterImages[name] == "" then
+            local libPath, libEntry = lookupCharacterLibrary(name)
+            if libPath then
+                characterImages[name] = libPath
+                libraryHits = libraryHits + 1
+            end
+        end
+
+        local currentPath = characterImages[name]
+        if currentPath and currentPath ~= "" then
+            -- Check if this came from the library and tag it visually
+            local libPath = lookupCharacterLibrary(name)
+            if libPath == currentPath then
+                item.Text[2] = currentPath .. "  (from library)"
+            else
+                item.Text[2] = currentPath
+            end
+        else
+            item.Text[2] = "(none)"
+        end
+
         itm.CharTree:AddTopLevelItem(item)
+    end
+
+    if libraryHits > 0 then
+        print(string.format("[ScriptToScreen] Auto-loaded %d character reference(s) from library", libraryHits))
     end
 end
 
@@ -1445,9 +1572,16 @@ function win.On.BrowseCharImg.Clicked(ev)
     if path and path ~= "" then
         characterImages[charName] = path
         selected.Text[2] = path
+        -- Persist to the global library so future projects with the same
+        -- character name auto-populate this ref image.
+        updateCharacterLibrary(charName, path)
+        print(string.format("[ScriptToScreen] Saved '%s' to character library", charName))
     end
 end
 
+-- Clear removes the ref image from THIS project only.
+-- The library entry is kept so other projects can still use it.
+-- (Users who want to remove from the library can overwrite with a new image.)
 function win.On.ClearCharImg.Clicked(ev)
     local selected = itm.CharTree:CurrentItem()
     if not selected then return end
