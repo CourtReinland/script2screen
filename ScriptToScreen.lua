@@ -370,7 +370,8 @@ local config = {
 local screenplayData = nil -- parsed screenplay (Lua table from JSON)
 local characterImages = {} -- characterName -> imagePath
 local characterVoices = {} -- characterName -> voiceId
-local generatedImages = {} -- shotKey -> imagePath
+local generatedImages = {} -- shotKey (s{N}_sh{M}) -> imagePath
+local failedImages = {}    -- shotKey (s{N}_sh{M}) -> error message
 local generatedVideos = {} -- shotKey -> videoPath
 local generatedAudio = {}  -- dialogueKey -> audioPath
 local lipSyncedVideos = {} -- shotKey -> videoPath
@@ -674,7 +675,8 @@ local win = disp:AddWindow({
                 ui:HGroup{
                     ui:Button{ID = "GenAllImages", Text = "Generate All Images", Weight = 0.3},
                     ui:Button{ID = "RegenImage", Text = "Regenerate Selected", Weight = 0.3},
-                    ui:Label{Text = "", Weight = 0.4},
+                    ui:Button{ID = "RetryFailedImages", Text = "Retry Failed", Weight = 0.3, Enabled = false},
+                    ui:Label{Text = "", Weight = 0.1},
                 },
                 ui:Label{ID = "ImageProgress", Text = "Ready"},
                 ui:VGap(0, 0.5),
@@ -1594,6 +1596,22 @@ function win.On.GenAllImages.Clicked(ev)
             local count = data.count or 0
             local totalShots = data.total_shots or 0
             local errs = data.errors or {}
+
+            -- Parse error strings ("s{N}_sh{M}: <msg>") into failedImages map
+            -- so we can show them in the tree and retry them in one click.
+            failedImages = {}
+            for _, errStr in ipairs(errs) do
+                local sk, msg = tostring(errStr):match("^(s%d+_sh%d+):%s*(.*)$")
+                if sk then
+                    failedImages[sk] = (msg and msg ~= "") and msg or "Unknown error"
+                end
+            end
+            -- Any previously-failed shot that now has a successful path is cleared
+            for sk, _ in pairs(generatedImages) do
+                failedImages[sk] = nil
+            end
+            -- Refresh the tree so users can see Failed/Done badges + retry count
+            pcall(populateImageTree)
             if count > 0 then
                 -- Import generated images to Resolve media pool (episode/scene bins)
                 local importMsg = ""
@@ -1673,6 +1691,259 @@ function win.On.GenAllImages.Clicked(ev)
         itm.ImageProgress.Text = "Failed — raw output: " .. tostring(result or ""):sub(1, 100)
         itm.ImageProgress.StyleSheet = "color: red;"
     end
+end
+
+-- Retry Failed: loops through every failed shot and regenerates it, one at a time.
+-- Successes populate generatedImages and are removed from failedImages.
+-- The tree refreshes after each attempt so progress is visible.
+function win.On.RetryFailedImages.Clicked(ev)
+    -- Collect failed shot keys (s0_sh0 format) up front so we don't
+    -- mutate the table while iterating.
+    local failedList = {}
+    for sk, _ in pairs(failedImages) do
+        table.insert(failedList, sk)
+    end
+    table.sort(failedList)
+
+    if #failedList == 0 then
+        itm.ImageProgress.Text = "No failed images to retry."
+        itm.ImageProgress.StyleSheet = "color: #888;"
+        return
+    end
+
+    -- Validate provider + API key (same checks as Generate All Images)
+    local imgPid = config.imageProvider
+    if imgPid == "freepik" and (config.providers.freepik.apiKey or "") == "" then
+        itm.ImageProgress.Text = "Set Freepik API key first (Step 1)!"
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
+    if imgPid == "grok" and (config.providers.grok.apiKey or "") == "" then
+        itm.ImageProgress.Text = "Set xAI API key first (Step 1)!"
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
+    if not screenplayData then
+        itm.ImageProgress.Text = "Parse a screenplay first (Step 2)!"
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
+
+    -- Disable the button while running so users don't double-click
+    itm.RetryFailedImages.Enabled = false
+
+    local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeStyle = itm.StylePath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local model = itm.ModelCombo.CurrentText or "realism"
+    local aspect = itm.AspectCombo.CurrentText or "widescreen_16_9"
+    local detail = itm.DetailSlider.Value or 33
+
+    local imgApiKey = ""
+    if imgPid == "freepik" then
+        imgApiKey = config.providers.freepik.apiKey or ""
+    elseif imgPid == "grok" then
+        imgApiKey = config.providers.grok.apiKey or ""
+    end
+    local keyfile = os.tmpname()
+    local kf = io.open(keyfile, "w")
+    if kf then kf:write(imgApiKey); kf:close() end
+
+    local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+
+    -- Build character image refs JSON (same as main gen)
+    local charImgParts = {}
+    for name, imgPath in pairs(characterImages) do
+        local safeName = name:gsub('"', '\\"')
+        local safeImg = imgPath:gsub("\\", "\\\\"):gsub('"', '\\"')
+        table.insert(charImgParts, '"' .. safeName .. '":"' .. safeImg .. '"')
+    end
+    local charImgJson = "{" .. table.concat(charImgParts, ",") .. "}"
+
+    -- Serialize the list of failed shot_keys as JSON
+    local failedKeysParts = {}
+    for _, sk in ipairs(failedList) do
+        table.insert(failedKeysParts, '"' .. sk .. '"')
+    end
+    local failedKeysJson = "[" .. table.concat(failedKeysParts, ",") .. "]"
+
+    local total = #failedList
+    itm.ImageProgress.Text = "Retrying " .. tostring(total) .. " failed images..."
+    itm.ImageProgress.StyleSheet = "color: #888;"
+
+    -- Derive project slug (same pattern as GenAllImages)
+    local projectSlugCode = 'import re\n'
+        .. 'try:\n'
+        .. '    import DaVinciResolveScript as dvr\n'
+        .. '    _resolve = dvr.scriptapp("Resolve")\n'
+        .. '    _pname = _resolve.GetProjectManager().GetCurrentProject().GetName()\n'
+        .. '    project_slug = re.sub(r"[^\\w\\-]", "_", _pname).strip("_").lower() or "default"\n'
+        .. 'except: project_slug = "default"\n'
+
+    -- Python batch: walks the screenplay, filters to failed_keys, reuses
+    -- build_image_prompt + regenerate_single_image, returns per-shot results.
+    local code = 'import json, traceback, os, uuid\n'
+        .. projectSlugCode
+        .. 'try:\n'
+        .. '    from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+        .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+        .. '    from script_to_screen.api.registry import create_image_provider\n'
+        .. '    from script_to_screen.pipeline.image_gen import build_image_prompt, regenerate_single_image\n'
+        .. '    from script_to_screen.config import GenerationDefaults\n'
+        .. '    from script_to_screen.manifest import update_character, record_generated_image\n'
+        .. '    script_path = "' .. safePath .. '"\n'
+        .. '    if script_path.lower().endswith(".pdf"):\n'
+        .. '        screenplay = parse_pdf(script_path)\n'
+        .. '    else:\n'
+        .. '        screenplay = parse_fountain(script_path)\n'
+        .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
+        .. '    for name, path in char_images.items():\n'
+        .. '        if name in screenplay.characters:\n'
+        .. '            screenplay.characters[name].reference_image_path = path\n'
+        .. '            update_character(project_slug, name, reference_image_path=path)\n'
+        .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
+        .. '    provider = create_image_provider("' .. imgPid .. '",\n'
+        .. '        api_key=api_key,\n'
+        .. '        server_url="' .. safeServerUrl .. '",\n'
+        .. '        model="' .. model .. '")\n'
+        .. '    defaults = GenerationDefaults(\n'
+        .. '        freepik_model="' .. model .. '",\n'
+        .. '        aspect_ratio="' .. aspect .. '",\n'
+        .. '        creative_detailing=' .. tostring(detail) .. ')\n'
+        .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
+        .. '    failed_keys = set(json.loads(\'' .. failedKeysJson:gsub("'", "\\'") .. '\'))\n'
+        .. '    paths = {}\n'
+        .. '    errors = []\n'
+        .. '    for scene in screenplay.scenes:\n'
+        .. '        for si, shot in enumerate(scene.shots):\n'
+        .. '            sk = f"s{scene.index}_sh{si}"\n'
+        .. '            if sk not in failed_keys: continue\n'
+        .. '            try:\n'
+        .. '                prompt = build_image_prompt(shot, scene, screenplay, shot_idx=si)\n'
+        .. '                char_refs = {}\n'
+        .. '                for c in shot.characters_present:\n'
+        .. '                    ch = screenplay.characters.get(c)\n'
+        .. '                    if ch and ch.reference_image_path:\n'
+        .. '                        char_refs[c] = ch.reference_image_path\n'
+        .. '                prompt = provider.build_prompt(prompt, char_refs)\n'
+        .. '                actual = regenerate_single_image(sk, prompt, provider, "' .. safeOutput .. '",\n'
+        .. '                    style_reference_path=style_path, defaults=defaults)\n'
+        .. '                if actual:\n'
+        .. '                    paths[sk] = actual\n'
+        .. '                    try:\n'
+        .. '                        record_generated_image(\n'
+        .. '                            project_slug=project_slug,\n'
+        .. '                            filename=os.path.basename(actual),\n'
+        .. '                            file_path=actual,\n'
+        .. '                            shot_key=sk,\n'
+        .. '                            prompt=prompt,\n'
+        .. '                            provider=type(provider).__name__,\n'
+        .. '                            provider_settings={"model": "' .. model .. '", "aspect_ratio": "' .. aspect .. '"},\n'
+        .. '                            style_reference_path=style_path or "",\n'
+        .. '                            character_refs=char_refs)\n'
+        .. '                    except Exception: pass\n'
+        .. '                else:\n'
+        .. '                    errors.append(f"{sk}: retry returned no image")\n'
+        .. '            except Exception as e:\n'
+        .. '                errors.append(f"{sk}: {e}")\n'
+        .. '    print(json.dumps({"status": "ok", "paths": paths, "errors": errors,\n'
+        .. '        "attempted": len(failed_keys), "recovered": len(paths)}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"status": "error", "error": str(e), "trace": traceback.format_exc()}))\n'
+
+    local result = runPython(code)
+    os.remove(keyfile)
+
+    local jsonStr = result and result:match("(%{.+%})")
+    if not jsonStr then
+        itm.ImageProgress.Text = "Retry failed — raw output: " .. tostring(result or ""):sub(1, 100)
+        itm.ImageProgress.StyleSheet = "color: red;"
+        itm.RetryFailedImages.Enabled = true
+        return
+    end
+
+    local data = JSON.decode(jsonStr)
+    if not data or data.status ~= "ok" then
+        itm.ImageProgress.Text = "Retry error: " .. ((data and data.error) or "Unknown")
+        itm.ImageProgress.StyleSheet = "color: red;"
+        if data and data.trace then print("[ScriptToScreen] " .. data.trace) end
+        itm.RetryFailedImages.Enabled = true
+        return
+    end
+
+    -- Merge recovered paths into generatedImages and remove from failedImages
+    local recovered = 0
+    for sk, path in pairs(data.paths or {}) do
+        generatedImages[sk] = path
+        failedImages[sk] = nil
+        recovered = recovered + 1
+    end
+    -- Record remaining errors with their new messages
+    for _, errStr in ipairs(data.errors or {}) do
+        local sk, msg = tostring(errStr):match("^(s%d+_sh%d+):%s*(.*)$")
+        if sk and not generatedImages[sk] then
+            failedImages[sk] = (msg and msg ~= "") and msg or "Unknown error"
+        end
+    end
+
+    -- Import recovered images into the media pool (reuses the same bin logic)
+    local importMsg = ""
+    local importOk, importErr = pcall(function()
+        local project = resolve:GetProjectManager():GetCurrentProject()
+        if project and recovered > 0 then
+            local mp = project:GetMediaPool()
+            local rootF = mp:GetRootFolder()
+            local stsBin2 = nil
+            for _, folder in pairs(rootF:GetSubFolders() or {}) do
+                if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
+            end
+            if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
+            local function findOrCreate(parent, name)
+                if not parent then return nil end
+                for _, f in pairs(parent:GetSubFolders() or {}) do
+                    if f:GetName() == name then return f end
+                end
+                return mp:AddSubFolder(parent, name)
+            end
+            local epPfx = buildEpisodePrefix()
+            local importCount = 0
+            for shotKey, imgPath in pairs(data.paths or {}) do
+                if type(imgPath) == "string" then
+                    local targetBin = stsBin2
+                    if epPfx ~= "" then targetBin = findOrCreate(targetBin, epPfx) end
+                    local sNum = tonumber((shotKey or ""):match("^s(%d+)")) or 0
+                    targetBin = findOrCreate(targetBin, "S" .. tostring(sNum))
+                    targetBin = findOrCreate(targetBin, "Images")
+                    if targetBin then mp:SetCurrentFolder(targetBin) end
+                    local items = mp:ImportMedia({imgPath}) or {}
+                    for _, item in ipairs(items) do
+                        local basename = imgPath:match("([^/]+)$") or ""
+                        pcall(function() item:SetMetadata("Comments", "STS:" .. basename) end)
+                    end
+                    importCount = importCount + #items
+                end
+            end
+            importMsg = " (" .. tostring(importCount) .. " added to bin)"
+        end
+    end)
+    if not importOk then
+        print("[ScriptToScreen] Retry bin import warning: " .. tostring(importErr))
+    end
+
+    -- Refresh tree to reflect new Done/Failed states
+    pcall(populateImageTree)
+
+    -- Summarize
+    local stillFailed = 0
+    for _ in pairs(failedImages) do stillFailed = stillFailed + 1 end
+    local msg = "Retry: recovered " .. tostring(recovered) .. " of " .. tostring(total) .. "!" .. importMsg
+    if stillFailed > 0 then
+        msg = msg .. " (" .. tostring(stillFailed) .. " still failing)"
+        itm.ImageProgress.StyleSheet = "color: orange; font-weight: bold;"
+    else
+        itm.ImageProgress.StyleSheet = "color: green; font-weight: bold;"
+    end
+    itm.ImageProgress.Text = msg
 end
 
 -- ImageTree selection → show the EXACT prompt that Python's build_image_prompt produces
@@ -2720,12 +2991,32 @@ local function populateImageTree()
             local desc = shot.description or ""
             if #desc > 80 then desc = desc:sub(1, 77) .. "..." end
             item.Text[3] = desc
-            -- Check if image already generated
-            local key = tostring(scene.index) .. "_" .. tostring(shot.index or 0)
-            item.Text[4] = generatedImages[key] and "Done" or "Pending"
+            -- Python-format shot key (matches generatedImages / failedImages keys)
+            local shotKey = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
+            if generatedImages[shotKey] then
+                item.Text[4] = "Done"
+                pcall(function() item.TextColor[4] = {R = 0.4, G = 0.85, B = 0.4, A = 1} end)
+            elseif failedImages[shotKey] then
+                item.Text[4] = "Failed"
+                pcall(function() item.TextColor[4] = {R = 0.95, G = 0.35, B = 0.35, A = 1} end)
+            else
+                item.Text[4] = "Pending"
+            end
             itm.ImageTree:AddTopLevelItem(item)
         end
     end
+    -- Update the Retry Failed button label with count (if button exists yet)
+    pcall(function()
+        local n = 0
+        for _ in pairs(failedImages) do n = n + 1 end
+        if n > 0 then
+            itm.RetryFailedImages.Text = "Retry Failed (" .. tostring(n) .. ")"
+            itm.RetryFailedImages.Enabled = true
+        else
+            itm.RetryFailedImages.Text = "Retry Failed"
+            itm.RetryFailedImages.Enabled = false
+        end
+    end)
 end
 
 local function populateVideoTree()
