@@ -58,6 +58,21 @@ def build_motion_prompt(shot: Shot, scene: Scene) -> str:
     return prompt
 
 
+def build_all_motion_prompts(screenplay: Screenplay) -> dict[str, str]:
+    """Build the auto motion-prompt for every shot in the screenplay.
+
+    Returns a dict keyed by shot_key ("s{scene}_sh{shot}") → prompt string.
+    Used by the Step 7 "Review Video Prompts" wizard page to populate its
+    tree in a single Python call.
+    """
+    out: dict[str, str] = {}
+    for scene in screenplay.scenes:
+        for si, shot in enumerate(scene.shots):
+            shot_key = f"s{scene.index}_sh{si}"
+            out[shot_key] = build_motion_prompt(shot, scene)
+    return out
+
+
 def generate_videos_for_screenplay(
     screenplay: Screenplay,
     provider: VideoProvider,

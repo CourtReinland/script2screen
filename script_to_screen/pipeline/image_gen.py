@@ -122,6 +122,21 @@ def build_image_prompt(
     return prompt
 
 
+def build_all_image_prompts(screenplay: Screenplay) -> dict[str, str]:
+    """Build the auto-prompt for every shot in the screenplay.
+
+    Returns a dict keyed by shot_key ("s{scene}_sh{shot}") → prompt string.
+    Used by the Step 5 "Review Image Prompts" wizard page to populate its
+    tree in a single Python call.
+    """
+    out: dict[str, str] = {}
+    for scene in screenplay.scenes:
+        for si, shot in enumerate(scene.shots):
+            shot_key = f"s{scene.index}_sh{si}"
+            out[shot_key] = build_image_prompt(shot, scene, screenplay, shot_idx=si)
+    return out
+
+
 def generate_images_for_screenplay(
     screenplay: Screenplay,
     provider: ImageProvider,

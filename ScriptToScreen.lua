@@ -337,7 +337,7 @@ end
 -- STATE
 -- ============================================================
 
-local STEPS = {"Welcome", "Script", "Characters", "Style", "Images", "Videos", "Voices", "Dialogue", "LipSync", "Assembly"}
+local STEPS = {"Welcome", "Script", "Characters", "Style", "Review Images", "Images", "Review Videos", "Videos", "Voices", "Dialogue", "LipSync", "Assembly"}
 local currentStep = 1
 
 local config = {
@@ -389,6 +389,17 @@ local failedImages = {}    -- shotKey (s{N}_sh{M}) -> error message
 local generatedVideos = {} -- shotKey -> videoPath
 local generatedAudio = {}  -- dialogueKey -> audioPath
 local lipSyncedVideos = {} -- shotKey -> videoPath
+
+-- Prompt review state (Step 5 Review Images + Step 7 Review Videos).
+-- Overrides live in memory and win at generation time (passed as
+-- custom_prompts=). Approval flags are advisory — they track whether the
+-- user has explicitly confirmed the prompt for that shot.
+local autoImagePrompts = {}       -- shotKey -> auto-generated prompt (from build_all_image_prompts)
+local imagePromptOverrides = {}   -- shotKey -> user-edited prompt (missing = use auto)
+local imagePromptApproved = {}    -- shotKey -> true when approved by user
+local autoVideoPrompts = {}       -- shotKey -> auto-generated motion prompt
+local videoPromptOverrides = {}   -- shotKey -> user-edited motion prompt
+local videoPromptApproved = {}    -- shotKey -> true when approved
 
 -- Derive project slug from current Resolve project name
 local projectSlug = "default"
@@ -846,7 +857,38 @@ local win = disp:AddWindow({
             },
 
             -- ========================
-            -- PAGE 4: Image Generation
+            -- PAGE 5: Review Image Prompts
+            -- ========================
+            ui:VGroup{
+                ID = "ReviewImagesPage",
+                ui:Label{
+                    Text = "<h3>Review Image Prompts</h3><p>Inspect and edit the prompt for each shot before generation. Unedited shots will use the auto prompt.</p>",
+                    Alignment = {AlignHCenter = true},
+                },
+                ui:HGroup{
+                    ui:Label{ID = "ImageReviewStatus", Text = "0 of 0 approved", Weight = 0.5},
+                    ui:Button{ID = "ImageApproveAll", Text = "Approve All", Weight = 0.25},
+                    ui:Button{ID = "ImageRefreshAuto", Text = "Refresh Auto Prompts", Weight = 0.25},
+                },
+                ui:Tree{ID = "ImageReviewTree", HeaderHidden = false, MinimumSize = {500, 180}},
+                ui:Label{Text = "Prompt for selected shot (edit freely):"},
+                ui:TextEdit{ID = "ImageReviewEdit", MinimumSize = {400, 90}},
+                ui:HGroup{
+                    ui:Button{ID = "ImageSaveEdit", Text = "Save Edit", Weight = 0.33},
+                    ui:Button{ID = "ImageResetAuto", Text = "Reset to Auto", Weight = 0.33},
+                    ui:Button{ID = "ImageApproveOne", Text = "Approve This Shot", Weight = 0.34},
+                },
+                ui:VGap(0, 0.5),
+                ui:HGroup{
+                    ui:Label{Text = "", Weight = 0.55},
+                    ui:Button{ID = "CancelBtn5", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn5", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn5", Text = "Next >", Weight = 0.15},
+                },
+            },
+
+            -- ========================
+            -- PAGE 6: Image Generation
             -- ========================
             ui:VGroup{
                 ID = "ImageGenPage",
@@ -864,14 +906,45 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn5", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn5", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn5", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn7", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn7", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn7", Text = "Next >", Weight = 0.15},
                 },
             },
 
             -- ========================
-            -- PAGE 5: Video Generation
+            -- PAGE 7: Review Video Prompts
+            -- ========================
+            ui:VGroup{
+                ID = "ReviewVideosPage",
+                ui:Label{
+                    Text = "<h3>Review Video Motion Prompts</h3><p>Inspect and edit the motion prompt for each shot before generation. Unedited shots will use the auto prompt.</p>",
+                    Alignment = {AlignHCenter = true},
+                },
+                ui:HGroup{
+                    ui:Label{ID = "VideoReviewStatus", Text = "0 of 0 approved", Weight = 0.5},
+                    ui:Button{ID = "VideoApproveAll", Text = "Approve All", Weight = 0.25},
+                    ui:Button{ID = "VideoRefreshAuto", Text = "Refresh Auto Prompts", Weight = 0.25},
+                },
+                ui:Tree{ID = "VideoReviewTree", HeaderHidden = false, MinimumSize = {500, 180}},
+                ui:Label{Text = "Motion prompt for selected shot (edit freely):"},
+                ui:TextEdit{ID = "VideoReviewEdit", MinimumSize = {400, 90}},
+                ui:HGroup{
+                    ui:Button{ID = "VideoSaveEdit", Text = "Save Edit", Weight = 0.33},
+                    ui:Button{ID = "VideoResetAuto", Text = "Reset to Auto", Weight = 0.33},
+                    ui:Button{ID = "VideoApproveOne", Text = "Approve This Shot", Weight = 0.34},
+                },
+                ui:VGap(0, 0.5),
+                ui:HGroup{
+                    ui:Label{Text = "", Weight = 0.55},
+                    ui:Button{ID = "CancelBtn6", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn6", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn6", Text = "Next >", Weight = 0.15},
+                },
+            },
+
+            -- ========================
+            -- PAGE 8: Video Generation
             -- ========================
             ui:VGroup{
                 ID = "VideoGenPage",
@@ -905,9 +978,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn6", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn6", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn6", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn8", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn8", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn8", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -938,9 +1011,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn7", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn7", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn7", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn9", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn9", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn9", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -960,9 +1033,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn8", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn8", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn8", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn10", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn10", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn10", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -982,9 +1055,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn9", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn9", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn9", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn11", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn11", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn11", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -1015,8 +1088,8 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn10", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn10", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn12", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn12", Text = "< Back", Weight = 0.15},
                     ui:Button{ID = "FinishBtn", Text = "Finish", Weight = 0.15},
                 },
             },
@@ -1278,8 +1351,15 @@ local function showStep(step)
     currentStep = step
     itm.PageStack.CurrentIndex = step - 1
     itm.StepLabel.Text = string.format("<b>%d/%d: %s</b>", step, #STEPS, STEPS[step])
-    -- When entering Assembly (step 10), set timeline name from episode info
-    if step == 10 then
+    -- When entering Review Images (step 5) or Review Videos (step 7),
+    -- ensure the review tree is populated from the current screenplay.
+    if step == 5 and screenplayData then
+        pcall(populateReviewTree, "image")
+    elseif step == 7 and screenplayData then
+        pcall(populateReviewTree, "video")
+    end
+    -- When entering Assembly (step 12), set timeline name from episode info
+    if step == 12 then
         local epNum = config.episodeNumber or ""
         local epTitle = config.episodeTitle or ""
         if epNum ~= "" or epTitle ~= "" then
@@ -1362,8 +1442,8 @@ local function onNext()
         saveConfig()
     end
 
-    -- Save Step 6 (Video generation settings) on Next
-    if currentStep == 6 then
+    -- Save Step 8 (Video generation settings) on Next — was Step 6 before review pages
+    if currentStep == 8 then
         config.videoModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
         config.videoCfgScale = (itm.VideoCfgSlider.Value or 50) / 100.0
         config.videoNegativePrompt = itm.VideoNegativePrompt.Text or ""
@@ -1400,6 +1480,8 @@ function win.On.CancelBtn7.Clicked(ev) onClose() end
 function win.On.CancelBtn8.Clicked(ev) onClose() end
 function win.On.CancelBtn9.Clicked(ev) onClose() end
 function win.On.CancelBtn10.Clicked(ev) onClose() end
+function win.On.CancelBtn11.Clicked(ev) onClose() end
+function win.On.CancelBtn12.Clicked(ev) onClose() end
 
 -- Back buttons
 function win.On.BackBtn2.Clicked(ev) onBack() end
@@ -1411,6 +1493,8 @@ function win.On.BackBtn7.Clicked(ev) onBack() end
 function win.On.BackBtn8.Clicked(ev) onBack() end
 function win.On.BackBtn9.Clicked(ev) onBack() end
 function win.On.BackBtn10.Clicked(ev) onBack() end
+function win.On.BackBtn11.Clicked(ev) onBack() end
+function win.On.BackBtn12.Clicked(ev) onBack() end
 
 -- Next buttons
 function win.On.NextBtn.Clicked(ev) onNext() end
@@ -1422,6 +1506,8 @@ function win.On.NextBtn6.Clicked(ev) onNext() end
 function win.On.NextBtn7.Clicked(ev) onNext() end
 function win.On.NextBtn8.Clicked(ev) onNext() end
 function win.On.NextBtn9.Clicked(ev) onNext() end
+function win.On.NextBtn10.Clicked(ev) onNext() end
+function win.On.NextBtn11.Clicked(ev) onNext() end
 
 -- Finish & Close
 function win.On.FinishBtn.Clicked(ev) onClose() end
@@ -1973,10 +2059,12 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        openai_background="' .. (config.openaiBackground or "auto") .. '",\n'
         .. '    )\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
+        .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
         .. '    results = generate_images_for_screenplay(\n'
         .. '        screenplay, provider, "' .. safeOutput .. '",\n'
         .. '        style_reference_path=style_path,\n'
         .. '        defaults=defaults,\n'
+        .. '        custom_prompts=custom_prompts or None,\n'
         .. '        project_slug=project_slug,\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'
@@ -2221,6 +2309,7 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '        openai_background="' .. (config.openaiBackground or "auto") .. '")\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
         .. '    failed_keys = set(json.loads(\'' .. failedKeysJson:gsub("'", "\\'") .. '\'))\n'
+        .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
         .. '    paths = {}\n'
         .. '    errors = []\n'
         .. '    for scene in screenplay.scenes:\n'
@@ -2228,7 +2317,11 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '            sk = f"s{scene.index}_sh{si}"\n'
         .. '            if sk not in failed_keys: continue\n'
         .. '            try:\n'
-        .. '                prompt = build_image_prompt(shot, scene, screenplay, shot_idx=si)\n'
+        .. '                # Use user-edited prompt if one exists for this shot\n'
+        .. '                if sk in custom_prompts and custom_prompts[sk]:\n'
+        .. '                    prompt = custom_prompts[sk]\n'
+        .. '                else:\n'
+        .. '                    prompt = build_image_prompt(shot, scene, screenplay, shot_idx=si)\n'
         .. '                char_refs = {}\n'
         .. '                for c in shot.characters_present:\n'
         .. '                    ch = screenplay.characters.get(c)\n'
@@ -2503,10 +2596,12 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '        if m:\n'
         .. '            key = m.group(1)\n'
         .. '            image_paths[key] = f  # latest file per shot wins\n'
+        .. '    custom_prompts = json.loads(\'' .. overridesJson("video"):gsub("'", "\\'") .. '\')\n'
         .. '    results = generate_videos_for_screenplay(\n'
         .. '        screenplay, provider, image_paths,\n'
         .. '        "' .. safeOutput .. '",\n'
         .. '        defaults=defaults,\n'
+        .. '        custom_prompts=custom_prompts or None,\n'
         .. '        project_slug="' .. projectSlug .. '",\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'
@@ -3382,6 +3477,263 @@ function win.On.AssembleBtn.Clicked(ev)
 end
 
 -- ============================================================
+-- PROMPT REVIEW PAGES (Step 5 Images, Step 7 Videos)
+-- ============================================================
+
+-- Serialize the screenplay path into a form suitable for Python string literals.
+local function safePyString(s)
+    return (s or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+end
+
+-- Load auto prompts for every shot via a single Python call.
+-- Fills either autoImagePrompts or autoVideoPrompts depending on `kind`.
+local function loadAutoPrompts(kind)
+    if not screenplayData then return end
+    local path = itm.ScriptPath and itm.ScriptPath.Text or ""
+    if path == "" then return end
+
+    local safePath = safePyString(path)
+    local fn = (kind == "image") and "build_all_image_prompts" or "build_all_motion_prompts"
+    local mod = (kind == "image") and "image_gen" or "video_gen"
+
+    local code = 'import json, traceback\n'
+        .. 'try:\n'
+        .. '    from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+        .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+        .. '    from script_to_screen.pipeline.' .. mod .. ' import ' .. fn .. '\n'
+        .. '    p = "' .. safePath .. '"\n'
+        .. '    if p.lower().endswith(".pdf"):\n'
+        .. '        sp = parse_pdf(p)\n'
+        .. '    else:\n'
+        .. '        sp = parse_fountain(p)\n'
+        .. '    print(json.dumps({"status":"ok","prompts":' .. fn .. '(sp)}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
+
+    local result = runPython(code)
+    local jsonStr = result and result:match("(%{.+%})")
+    if not jsonStr then return end
+    local data = JSON.decode(jsonStr)
+    if not data or data.status ~= "ok" or type(data.prompts) ~= "table" then return end
+
+    if kind == "image" then
+        autoImagePrompts = data.prompts
+    else
+        autoVideoPrompts = data.prompts
+    end
+end
+
+-- Compute what will actually be sent at generation time for a shot:
+-- user override if set, otherwise the auto prompt. Empty string if neither exists.
+local function effectivePromptFor(kind, shotKey)
+    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
+    local autos = (kind == "image") and autoImagePrompts or autoVideoPrompts
+    if overrides[shotKey] ~= nil then return overrides[shotKey] end
+    return autos[shotKey] or ""
+end
+
+local function approvedCount(kind)
+    local approved = (kind == "image") and imagePromptApproved or videoPromptApproved
+    local n = 0
+    for _, v in pairs(approved) do if v then n = n + 1 end end
+    return n
+end
+
+-- Update status label and tree row badges for the given review kind.
+local function refreshReviewStatus(kind)
+    if not screenplayData or not screenplayData.scenes then return end
+    local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
+    local statusLbl = (kind == "image") and itm.ImageReviewStatus or itm.VideoReviewStatus
+    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
+    local approved = (kind == "image") and imagePromptApproved or videoPromptApproved
+
+    local total = 0
+    for _, scene in ipairs(screenplayData.scenes) do
+        total = total + #(scene.shots or {})
+    end
+    statusLbl.Text = tostring(approvedCount(kind)) .. " of " .. tostring(total) .. " approved"
+end
+
+-- Populate a review tree with one row per shot.
+local function populateReviewTree(kind)
+    if not screenplayData or not screenplayData.scenes then return end
+    local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
+    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
+    local approved = (kind == "image") and imagePromptApproved or videoPromptApproved
+
+    -- Build auto prompts if we don't have them yet
+    local autos = (kind == "image") and autoImagePrompts or autoVideoPrompts
+    local hasAutos = false
+    for _ in pairs(autos) do hasAutos = true; break end
+    if not hasAutos then loadAutoPrompts(kind) end
+
+    local hdr = tree:NewItem()
+    hdr.Text[0] = "Scene"
+    hdr.Text[1] = "Shot"
+    hdr.Text[2] = "Type"
+    hdr.Text[3] = "State"
+    hdr.Text[4] = "Prompt preview"
+    tree:SetHeaderItem(hdr)
+    tree.ColumnCount = 5
+    tree.ColumnWidth[0] = 60
+    tree.ColumnWidth[1] = 40
+    tree.ColumnWidth[2] = 50
+    tree.ColumnWidth[3] = 90
+    tree.ColumnWidth[4] = 500
+
+    tree:Clear()
+    for _, scene in ipairs(screenplayData.scenes) do
+        for _, shot in ipairs(scene.shots or {}) do
+            local shotKey = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
+            local item = tree:NewItem()
+            item.Text[0] = tostring(scene.index)
+            item.Text[1] = tostring((shot.index or 0) + 1)
+            item.Text[2] = shot.shot_type or ""
+            local edited = (overrides[shotKey] ~= nil)
+            local ok = approved[shotKey] == true
+            local state = "Auto"
+            if edited and ok then state = "Edited \xE2\x9C\x93"
+            elseif edited then state = "Edited"
+            elseif ok then state = "\xE2\x9C\x93 Approved" end
+            item.Text[3] = state
+            local preview = effectivePromptFor(kind, shotKey)
+            if #preview > 120 then preview = preview:sub(1, 117) .. "..." end
+            item.Text[4] = preview
+            -- Color hint: green approved, orange edited, default otherwise
+            pcall(function()
+                if ok then
+                    item.TextColor[3] = {R = 0.4, G = 0.85, B = 0.4, A = 1}
+                elseif edited then
+                    item.TextColor[3] = {R = 0.95, G = 0.65, B = 0.35, A = 1}
+                end
+            end)
+            tree:AddTopLevelItem(item)
+        end
+    end
+
+    refreshReviewStatus(kind)
+end
+
+-- Get the shot_key for the currently-selected tree row.
+local function selectedShotKey(kind)
+    local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
+    local item = tree:CurrentItem()
+    if not item then return nil end
+    local sceneIdx = tonumber(item.Text[0])
+    local shotDisplay = tonumber(item.Text[1])
+    if not sceneIdx or not shotDisplay then return nil end
+    return "s" .. tostring(sceneIdx) .. "_sh" .. tostring(shotDisplay - 1)
+end
+
+-- Row click → populate the TextEdit with the effective prompt (override > auto).
+function win.On.ImageReviewTree.ItemClicked(ev)
+    local sk = selectedShotKey("image")
+    if not sk then return end
+    itm.ImageReviewEdit.PlainText = effectivePromptFor("image", sk)
+end
+function win.On.VideoReviewTree.ItemClicked(ev)
+    local sk = selectedShotKey("video")
+    if not sk then return end
+    itm.VideoReviewEdit.PlainText = effectivePromptFor("video", sk)
+end
+
+-- Save Edit: persist current TextEdit content as override; mark approved.
+function win.On.ImageSaveEdit.Clicked(ev)
+    local sk = selectedShotKey("image")
+    if not sk then return end
+    imagePromptOverrides[sk] = itm.ImageReviewEdit.PlainText or ""
+    imagePromptApproved[sk] = true
+    populateReviewTree("image")
+end
+function win.On.VideoSaveEdit.Clicked(ev)
+    local sk = selectedShotKey("video")
+    if not sk then return end
+    videoPromptOverrides[sk] = itm.VideoReviewEdit.PlainText or ""
+    videoPromptApproved[sk] = true
+    populateReviewTree("video")
+end
+
+-- Reset to Auto: drop override and approval for this shot.
+function win.On.ImageResetAuto.Clicked(ev)
+    local sk = selectedShotKey("image")
+    if not sk then return end
+    imagePromptOverrides[sk] = nil
+    imagePromptApproved[sk] = nil
+    itm.ImageReviewEdit.PlainText = autoImagePrompts[sk] or ""
+    populateReviewTree("image")
+end
+function win.On.VideoResetAuto.Clicked(ev)
+    local sk = selectedShotKey("video")
+    if not sk then return end
+    videoPromptOverrides[sk] = nil
+    videoPromptApproved[sk] = nil
+    itm.VideoReviewEdit.PlainText = autoVideoPrompts[sk] or ""
+    populateReviewTree("video")
+end
+
+-- Approve This Shot: mark the current shot approved without changing its text.
+function win.On.ImageApproveOne.Clicked(ev)
+    local sk = selectedShotKey("image")
+    if not sk then return end
+    imagePromptApproved[sk] = true
+    populateReviewTree("image")
+end
+function win.On.VideoApproveOne.Clicked(ev)
+    local sk = selectedShotKey("video")
+    if not sk then return end
+    videoPromptApproved[sk] = true
+    populateReviewTree("video")
+end
+
+-- Approve All: mark every shot approved.
+function win.On.ImageApproveAll.Clicked(ev)
+    if not screenplayData then return end
+    for _, scene in ipairs(screenplayData.scenes) do
+        for _, shot in ipairs(scene.shots or {}) do
+            local sk = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
+            imagePromptApproved[sk] = true
+        end
+    end
+    populateReviewTree("image")
+end
+function win.On.VideoApproveAll.Clicked(ev)
+    if not screenplayData then return end
+    for _, scene in ipairs(screenplayData.scenes) do
+        for _, shot in ipairs(scene.shots or {}) do
+            local sk = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
+            videoPromptApproved[sk] = true
+        end
+    end
+    populateReviewTree("video")
+end
+
+-- Refresh Auto Prompts: re-call Python to rebuild autos (useful after
+-- editing character refs, changing model, etc.).
+function win.On.ImageRefreshAuto.Clicked(ev)
+    autoImagePrompts = {}
+    loadAutoPrompts("image")
+    populateReviewTree("image")
+end
+function win.On.VideoRefreshAuto.Clicked(ev)
+    autoVideoPrompts = {}
+    loadAutoPrompts("video")
+    populateReviewTree("video")
+end
+
+-- Serialize overrides to a JSON string payload for custom_prompts= passthrough.
+-- Only includes explicitly-edited shots; auto prompts are left to the backend.
+local function overridesJson(kind)
+    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
+    local parts = {}
+    for k, v in pairs(overrides) do
+        local safeK = k:gsub('"', '\\"')
+        local safeV = v:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "")
+        table.insert(parts, '"' .. safeK .. '":"' .. safeV .. '"')
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- ============================================================
 -- POPULATE TREES WHEN ENTERING STEPS
 -- ============================================================
 
@@ -3561,11 +3913,11 @@ function win.On.NextBtn.Clicked(ev) onNext() end
 function win.On.NextBtn2.Clicked(ev) onNext() end
 function win.On.NextBtn3.Clicked(ev) onNext() end
 function win.On.NextBtn4.Clicked(ev) onNext() end
-function win.On.NextBtn5.Clicked(ev) onNext() end
-function win.On.NextBtn6.Clicked(ev) onNext() end
 function win.On.NextBtn7.Clicked(ev) onNext() end
 function win.On.NextBtn8.Clicked(ev) onNext() end
 function win.On.NextBtn9.Clicked(ev) onNext() end
+function win.On.NextBtn10.Clicked(ev) onNext() end
+function win.On.NextBtn11.Clicked(ev) onNext() end
 
 -- ============================================================
 -- SHOW AND RUN
