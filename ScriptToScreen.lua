@@ -1246,50 +1246,47 @@ itm.AspectCombo:AddItem("widescreen_16_9")
 itm.AspectCombo:AddItem("classic_4_3")
 itm.AspectCombo:AddItem("square_1_1")
 
--- Freepik Mystic per-model combos
-for _, v in ipairs({"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}) do
-    itm.FreepikEngineCombo:AddItem(v)
-end
-for _, v in ipairs({"1k", "2k", "4k"}) do
-    itm.FreepikResolutionCombo:AddItem(v)
-end
-
--- OpenAI gpt-image-2 per-model combos
-for _, v in ipairs({"auto", "low", "medium", "high"}) do
-    itm.OpenAIQualityCombo:AddItem(v)
-end
-for _, v in ipairs({"auto", "1024x1024", "1536x1024", "1024x1536"}) do
-    itm.OpenAISizeCombo:AddItem(v)
-end
-for _, v in ipairs({"png", "jpeg", "webp"}) do
-    itm.OpenAIFormatCombo:AddItem(v)
-end
-for _, v in ipairs({"auto", "opaque", "transparent"}) do
-    itm.OpenAIBgCombo:AddItem(v)
-end
-
--- Helper: set a combo box to match a string value
-local function setComboToValue(combo, value)
-    for i = 0, combo.Count - 1 do
-        if combo.ItemText[i] == value then
-            combo.CurrentIndex = i
+-- Helper: set a combo box to a value by matching against a known list.
+-- Fusion UI's `Count` is a method (not a field), so we iterate the values
+-- list the caller already built when populating the combo.
+local function setComboToValue(combo, values, value)
+    if type(values) ~= "table" then return end
+    for i, v in ipairs(values) do
+        if v == value then
+            combo.CurrentIndex = i - 1
             return
         end
     end
     combo.CurrentIndex = 0
 end
 
+-- Freepik Mystic per-model combos
+local freepikEngines = {"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}
+for _, v in ipairs(freepikEngines) do itm.FreepikEngineCombo:AddItem(v) end
+local freepikResolutions = {"1k", "2k", "4k"}
+for _, v in ipairs(freepikResolutions) do itm.FreepikResolutionCombo:AddItem(v) end
+
+-- OpenAI gpt-image-2 per-model combos
+local openaiQualities = {"auto", "low", "medium", "high"}
+for _, v in ipairs(openaiQualities) do itm.OpenAIQualityCombo:AddItem(v) end
+local openaiSizes = {"auto", "1024x1024", "1536x1024", "1024x1536"}
+for _, v in ipairs(openaiSizes) do itm.OpenAISizeCombo:AddItem(v) end
+local openaiFormats = {"png", "jpeg", "webp"}
+for _, v in ipairs(openaiFormats) do itm.OpenAIFormatCombo:AddItem(v) end
+local openaiBackgrounds = {"auto", "opaque", "transparent"}
+for _, v in ipairs(openaiBackgrounds) do itm.OpenAIBgCombo:AddItem(v) end
+
 -- Initialize per-model option values from config
-setComboToValue(itm.FreepikEngineCombo, config.freepikEngine)
-setComboToValue(itm.FreepikResolutionCombo, config.freepikResolution)
+setComboToValue(itm.FreepikEngineCombo, freepikEngines, config.freepikEngine)
+setComboToValue(itm.FreepikResolutionCombo, freepikResolutions, config.freepikResolution)
 itm.FreepikStructureSlider.Value = config.freepikStructureStrength or 50
 itm.FreepikStructureValue.Text = tostring(itm.FreepikStructureSlider.Value)
-setComboToValue(itm.OpenAIQualityCombo, config.openaiQuality)
-setComboToValue(itm.OpenAISizeCombo, config.openaiSize)
-setComboToValue(itm.OpenAIFormatCombo, config.openaiOutputFormat)
-setComboToValue(itm.OpenAIBgCombo, config.openaiBackground)
+setComboToValue(itm.OpenAIQualityCombo, openaiQualities, config.openaiQuality)
+setComboToValue(itm.OpenAISizeCombo, openaiSizes, config.openaiSize)
+setComboToValue(itm.OpenAIFormatCombo, openaiFormats, config.openaiOutputFormat)
+setComboToValue(itm.OpenAIBgCombo, openaiBackgrounds, config.openaiBackground)
 
--- Video model selector (Step 6)
+-- Video model selector (Step 8)
 local videoModels = {
     "kling-v3-omni",
     "kling-v2-5-pro",
@@ -1302,7 +1299,7 @@ local videoModels = {
 for _, vm in ipairs(videoModels) do
     itm.VideoModelCombo:AddItem(vm)
 end
-setComboToValue(itm.VideoModelCombo, config.videoModel or "kling-v3-omni")
+setComboToValue(itm.VideoModelCombo, videoModels, config.videoModel or "kling-v3-omni")
 
 -- Video CFG slider (0-100 UI → 0.0-1.0 API). Store as float in config.
 itm.VideoCfgSlider.Value = math.floor((config.videoCfgScale or 0.5) * 100 + 0.5)
@@ -1346,6 +1343,11 @@ itm.FPSCombo:AddItem("30")
 -- ============================================================
 -- NAVIGATION
 -- ============================================================
+
+-- Forward-declare populateReviewTree so showStep can call it before the
+-- real definition appears below (Lua locals aren't visible to code that
+-- parsed earlier in the same chunk).
+local populateReviewTree
 
 local function showStep(step)
     currentStep = step
@@ -3555,7 +3557,9 @@ local function refreshReviewStatus(kind)
 end
 
 -- Populate a review tree with one row per shot.
-local function populateReviewTree(kind)
+-- (Assigns to the forward-declared `populateReviewTree` so `showStep`
+-- above can reach it.)
+populateReviewTree = function(kind)
     if not screenplayData or not screenplayData.scenes then return end
     local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
     local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
