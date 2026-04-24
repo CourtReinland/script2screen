@@ -12,6 +12,23 @@ logger = logging.getLogger("ScriptToScreen")
 
 BASE_URL = "https://api.freepik.com/v1"
 
+# Map internal video model id → (submit path, status path prefix).
+# Status path prefix is joined with "/{task_id}" when polling.
+# Ref: https://docs.freepik.com/llms.txt
+VIDEO_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "kling-v3-omni":      ("/video/kling-v3-omni/generate-pro",        "/video/kling-v3-omni"),
+    "kling-v2-5-pro":     ("/ai/image-to-video/kling-v2.5-pro",        "/ai/image-to-video/kling-v2.5-pro"),
+    "kling-v2-6-pro":     ("/ai/image-to-video/kling-v2-6-pro",        "/ai/image-to-video/kling-v2-6-pro"),
+    "kling-o1-pro":       ("/ai/image-to-video/kling-o1-pro",          "/ai/image-to-video/kling-o1-pro"),
+    "seedance-pro-1080p": ("/ai/image-to-video/seedance-pro-1080p",    "/ai/image-to-video/seedance-pro-1080p"),
+    "minimax-hailuo-2-3": ("/ai/image-to-video/minimax-hailuo-2-3-1080p", "/ai/image-to-video/minimax-hailuo-2-3-1080p"),
+    "wan-v2-6-1080p":     ("/ai/image-to-video/wan-v2-6-1080p",        "/ai/image-to-video/wan-v2-6-1080p"),
+}
+
+# Mystic engine options
+MYSTIC_ENGINES = {"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}
+MYSTIC_RESOLUTIONS = {"1k", "2k", "4k"}
+
 
 class FreepikClient:
     """Client for Freepik AI generation APIs."""
@@ -64,16 +81,35 @@ class FreepikClient:
         model: str = "realism",
         aspect_ratio: str = "widescreen_16_9",
         creative_detailing: int = 33,
+        engine: str = "automatic",
+        resolution: str = "2k",
+        structure_strength: int = 50,
+        structure_reference_path: Optional[str] = None,
+        webhook_url: Optional[str] = None,
     ) -> str:
         """
         Generate an image using Freepik Mystic API.
+
+        Args:
+            prompt: Text description.
+            style_reference_path: Optional style reference image (local path).
+            style_adherence: 0-100, how strongly to match style reference.
+            model: Mystic model (realism, fluid, zen, flexible, super_real, editorial_portraits).
+            aspect_ratio: Internal aspect ratio slug.
+            creative_detailing: 0-100, detail enhancement.
+            engine: 'automatic' | 'magnific_sparkle' | 'magnific_illusio' | 'magnific_sharpy'.
+            resolution: '1k' | '2k' | '4k'.
+            structure_strength: 0-100 (only applies when structure_reference_path is set).
+            structure_reference_path: Optional structure reference image (local path).
+            webhook_url: If set, Freepik posts status updates here instead of
+                needing to be polled. Still returns a task_id for polling as fallback.
 
         Returns:
             task_id for polling.
         """
         self.image_limiter.wait()
 
-        payload = {
+        payload: dict = {
             "prompt": prompt,
             "model": model,
             "aspect_ratio": aspect_ratio,
@@ -81,10 +117,27 @@ class FreepikClient:
             "filter_nsfw": False,
         }
 
+        # Validate and include per-model parameters
+        if engine and engine in MYSTIC_ENGINES and engine != "automatic":
+            payload["engine"] = engine
+        if resolution and resolution in MYSTIC_RESOLUTIONS:
+            payload["resolution"] = resolution
+
         if style_reference_path:
             payload["style_reference"] = image_to_base64(style_reference_path)
             payload["adherence"] = style_adherence
 
+        if structure_reference_path:
+            payload["structure_reference"] = image_to_base64(structure_reference_path)
+            payload["structure_strength"] = max(0, min(100, structure_strength))
+
+        if webhook_url:
+            payload["webhook_url"] = webhook_url
+
+        logger.info(
+            f"[Freepik] POST /ai/mystic  model={model}  engine={engine}  "
+            f"resolution={resolution}  aspect={aspect_ratio}"
+        )
         resp = self._post(f"{BASE_URL}/ai/mystic", payload)
         data = resp.get("data", resp)
         task_id = data.get("task_id", data.get("id", ""))
@@ -109,7 +162,7 @@ class FreepikClient:
             f.write(resp.content)
         return save_path
 
-    # ── Video Generation (Kling 3 Omni) ──────────────────────────────
+    # ── Video Generation (multi-model dispatch) ──────────────────────
 
     def generate_video(
         self,
@@ -119,49 +172,79 @@ class FreepikClient:
         duration: int = 5,
         negative_prompt: str = "",
         cfg_scale: float = 0.5,
+        model: str = "kling-v3-omni",
+        webhook_url: Optional[str] = None,
     ) -> str:
         """
-        Generate a video using Kling 3 Omni via Freepik.
+        Generate a video via one of the Freepik video models.
 
-        Provide either start_image_path (local file) or start_image_url.
+        The `model` argument selects the submit endpoint (see VIDEO_ENDPOINTS).
+        The body shape is roughly uniform across models (prompt + image_url +
+        duration + cfg_scale + optional negative_prompt); models that need
+        extras can have them added later.
 
         Returns:
-            task_id for polling.
+            task_id for polling (prefixed with 'model:' so check_video_status
+            knows which endpoint to query).
         """
         self.video_limiter.wait()
 
-        payload = {
+        submit_path, _ = VIDEO_ENDPOINTS.get(
+            model, VIDEO_ENDPOINTS["kling-v3-omni"]
+        )
+        if model not in VIDEO_ENDPOINTS:
+            logger.warning(f"Unknown video model '{model}', falling back to kling-v3-omni")
+            model = "kling-v3-omni"
+
+        payload: dict = {
             "prompt": prompt,
             "duration": duration,
             "cfg_scale": cfg_scale,
         }
 
         if start_image_path:
-            # Kling v3 Omni API expects "image_url" with a data URI for local files
+            # Most Freepik video endpoints accept "image_url" with a data URI for local files.
             b64 = image_to_base64(start_image_path)
             ext = start_image_path.rsplit(".", 1)[-1].lower()
             mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "image/png")
             payload["image_url"] = f"data:{mime};base64,{b64}"
-            logger.info(f"Video generation: using start frame from {start_image_path}")
+            logger.info(f"[Freepik video] start frame: {start_image_path}")
         elif start_image_url:
             payload["image_url"] = start_image_url
         else:
-            logger.info("Video generation: no start image, using text-to-video mode")
+            logger.info("[Freepik video] no start image, text-to-video mode")
 
         if negative_prompt:
             payload["negative_prompt"] = negative_prompt
 
-        resp = self._post(
-            f"{BASE_URL}/video/kling-v3-omni/generate-pro", payload
-        )
+        if webhook_url:
+            payload["webhook_url"] = webhook_url
+
+        logger.info(f"[Freepik] POST {submit_path}  model={model}  dur={duration}  cfg={cfg_scale}")
+        resp = self._post(f"{BASE_URL}{submit_path}", payload)
         data = resp.get("data", resp)
-        task_id = data.get("task_id", data.get("id", ""))
+        raw_task_id = data.get("task_id", data.get("id", ""))
+        # Namespace the task_id so we can route the status check back to
+        # the right endpoint later without needing separate providers.
+        task_id = f"{model}:{raw_task_id}"
         logger.info(f"Video generation started: {task_id}")
         return task_id
 
     def check_video_status(self, task_id: str) -> dict:
-        """Check status of a video generation task."""
-        resp = self._get(f"{BASE_URL}/video/kling-v3-omni/{task_id}")
+        """Check status of a video generation task.
+
+        The task_id is 'model:raw_id' (namespace set by generate_video).
+        Legacy unprefixed ids default to kling-v3-omni for backward compat.
+        """
+        if ":" in task_id:
+            model, raw_id = task_id.split(":", 1)
+        else:
+            model, raw_id = "kling-v3-omni", task_id
+
+        _, status_prefix = VIDEO_ENDPOINTS.get(
+            model, VIDEO_ENDPOINTS["kling-v3-omni"]
+        )
+        resp = self._get(f"{BASE_URL}{status_prefix}/{raw_id}")
         data = resp.get("data", resp)
         return {
             "status": data.get("status", "UNKNOWN"),

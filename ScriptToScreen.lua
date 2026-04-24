@@ -342,15 +342,16 @@ local currentStep = 1
 
 local config = {
     -- Provider selections
-    imageProvider = "freepik",        -- "freepik" or "comfyui_flux"
-    videoProvider = "freepik",        -- "freepik" or "comfyui_ltx"
-    voiceProvider = "elevenlabs",     -- "elevenlabs" or "voicebox"
-    lipsyncProvider = "freepik",      -- "freepik" (Kling lip sync)
+    imageProvider = "freepik",        -- "freepik" | "grok" | "openai" | "comfyui_flux"
+    videoProvider = "freepik",        -- "freepik" | "grok" | "comfyui_ltx"
+    voiceProvider = "elevenlabs",     -- "elevenlabs" | "voicebox" | "mlx_audio"
+    lipsyncProvider = "freepik",      -- "freepik" (Kling lip sync) | "kling"
     -- Per-provider credentials
     providers = {
-        freepik    = { apiKey = "" },
+        freepik    = { apiKey = "", webhookKey = "" },  -- webhookKey stored for future use
         elevenlabs = { apiKey = "" },
         grok       = { apiKey = "" },
+        openai     = { apiKey = "" },
         comfyui    = { serverUrl = "http://127.0.0.1:8188" },
         voicebox   = { serverUrl = "http://127.0.0.1:17493" },
         kling      = { apiKey = "" },
@@ -358,10 +359,23 @@ local config = {
     -- Legacy (kept for backward compat)
     freepikKey = "",
     elevenlabsKey = "",
-    -- Generation settings
-    model = "realism",
+    -- Generation settings (image — cross-provider)
+    model = "realism",                -- Freepik Mystic model
     aspectRatio = "widescreen_16_9",
     detailing = 33,
+    -- Freepik Mystic per-model options
+    freepikEngine = "automatic",      -- automatic | magnific_sparkle | magnific_illusio | magnific_sharpy
+    freepikResolution = "2k",         -- 1k | 2k | 4k
+    freepikStructureStrength = 50,    -- 0-100
+    -- OpenAI gpt-image-2 per-model options
+    openaiQuality = "auto",           -- low | medium | high | auto
+    openaiSize = "auto",              -- 1024x1024 | 1536x1024 | 1024x1536 | auto
+    openaiOutputFormat = "png",       -- png | jpeg | webp
+    openaiBackground = "auto",        -- transparent | opaque | auto
+    -- Video generation settings
+    videoModel = "kling-v3-omni",     -- see freepik_client.VIDEO_ENDPOINTS
+    videoCfgScale = 0.5,              -- 0.0-1.0
+    videoNegativePrompt = "",
     -- Episode info
     episodeNumber = "",
     episodeTitle = "",
@@ -430,6 +444,7 @@ do
             if saved.providers then
                 if saved.providers.freepik then
                     config.providers.freepik.apiKey = saved.providers.freepik.apiKey or ""
+                    config.providers.freepik.webhookKey = saved.providers.freepik.webhookKey or ""
                 end
                 if saved.providers.elevenlabs then
                     config.providers.elevenlabs.apiKey = saved.providers.elevenlabs.apiKey or ""
@@ -439,6 +454,9 @@ do
                 end
                 if saved.providers.grok then
                     config.providers.grok.apiKey = saved.providers.grok.apiKey or ""
+                end
+                if saved.providers.openai then
+                    config.providers.openai.apiKey = saved.providers.openai.apiKey or ""
                 end
                 if saved.providers.kling then
                     config.providers.kling.apiKey = saved.providers.kling.apiKey or ""
@@ -457,10 +475,28 @@ do
             -- Legacy fields (kept for compat)
             config.freepikKey = config.providers.freepik.apiKey
             config.elevenlabsKey = config.providers.elevenlabs.apiKey
-            -- Generation settings
+            -- Generation settings (image)
             config.model = saved.model or "realism"
             config.aspectRatio = saved.aspectRatio or "widescreen_16_9"
             config.detailing = saved.detailing or 33
+            -- Freepik Mystic per-model options
+            config.freepikEngine = saved.freepikEngine or "automatic"
+            config.freepikResolution = saved.freepikResolution or "2k"
+            config.freepikStructureStrength = saved.freepikStructureStrength or 50
+            -- OpenAI gpt-image-2 per-model options
+            config.openaiQuality = saved.openaiQuality or "auto"
+            config.openaiSize = saved.openaiSize or "auto"
+            config.openaiOutputFormat = saved.openaiOutputFormat or "png"
+            config.openaiBackground = saved.openaiBackground or "auto"
+            -- Video generation
+            config.videoModel = saved.videoModel or "kling-v3-omni"
+            config.videoCfgScale = saved.videoCfgScale or 0.5
+            config.videoNegativePrompt = saved.videoNegativePrompt or ""
+            -- Provider selections (ensure defaults if missing)
+            config.imageProvider = saved.imageProvider or config.imageProvider
+            config.videoProvider = saved.videoProvider or config.videoProvider
+            config.voiceProvider = saved.voiceProvider or config.voiceProvider
+            config.lipsyncProvider = saved.lipsyncProvider or config.lipsyncProvider
             config.episodeNumber = saved.episodeNumber or ""
             config.episodeTitle = saved.episodeTitle or ""
         end
@@ -629,6 +665,12 @@ local win = disp:AddWindow({
                     ui:LineEdit{ID = "ImageServerUrl", Text = "http://127.0.0.1:8188", Weight = 0.65},
                     ui:Label{Text = "", Weight = 0.2},
                 },
+                -- Freepik webhook key (optional — stored for future webhook integration)
+                ui:HGroup{
+                    ui:Label{Text = "Freepik Webhook Key:", Weight = 0.22, StyleSheet = "color: #888; font-size: 10px;"},
+                    ui:LineEdit{ID = "FreepikWebhookKey", PlaceholderText = "(optional, for future use)", EchoMode = "Password", Weight = 0.58},
+                    ui:Label{Text = "", Weight = 0.2},
+                },
 
                 -- Video Provider
                 ui:Label{Text = "<b>Video Generation</b>", StyleSheet = "padding-top: 8px;"},
@@ -753,6 +795,47 @@ local win = disp:AddWindow({
                     ui:Slider{ID = "DetailSlider", Minimum = 0, Maximum = 100, Value = 33, Weight = 0.6},
                     ui:Label{ID = "DetailValue", Text = "33", Weight = 0.2},
                 },
+
+                -- Freepik Mystic per-model options (shown only when imageProvider == "freepik")
+                ui:HGroup{
+                    ID = "FreepikEngineRow",
+                    ui:Label{Text = "Engine (Freepik):", Weight = 0.2},
+                    ui:ComboBox{ID = "FreepikEngineCombo", Weight = 0.8},
+                },
+                ui:HGroup{
+                    ID = "FreepikResolutionRow",
+                    ui:Label{Text = "Resolution (Freepik):", Weight = 0.2},
+                    ui:ComboBox{ID = "FreepikResolutionCombo", Weight = 0.8},
+                },
+                ui:HGroup{
+                    ID = "FreepikStructureRow",
+                    ui:Label{Text = "Structure (Freepik):", Weight = 0.2},
+                    ui:Slider{ID = "FreepikStructureSlider", Minimum = 0, Maximum = 100, Value = 50, Weight = 0.6},
+                    ui:Label{ID = "FreepikStructureValue", Text = "50", Weight = 0.2},
+                },
+
+                -- OpenAI gpt-image-2 per-model options (shown only when imageProvider == "openai")
+                ui:HGroup{
+                    ID = "OpenAIQualityRow",
+                    ui:Label{Text = "Quality (OpenAI):", Weight = 0.2},
+                    ui:ComboBox{ID = "OpenAIQualityCombo", Weight = 0.8},
+                },
+                ui:HGroup{
+                    ID = "OpenAISizeRow",
+                    ui:Label{Text = "Size (OpenAI):", Weight = 0.2},
+                    ui:ComboBox{ID = "OpenAISizeCombo", Weight = 0.8},
+                },
+                ui:HGroup{
+                    ID = "OpenAIFormatRow",
+                    ui:Label{Text = "Format (OpenAI):", Weight = 0.2},
+                    ui:ComboBox{ID = "OpenAIFormatCombo", Weight = 0.8},
+                },
+                ui:HGroup{
+                    ID = "OpenAIBgRow",
+                    ui:Label{Text = "Background (OpenAI):", Weight = 0.2},
+                    ui:ComboBox{ID = "OpenAIBgCombo", Weight = 0.8},
+                },
+
                 ui:VGap(0, 1),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
@@ -795,10 +878,23 @@ local win = disp:AddWindow({
                 ui:Label{Text = "<h3>Video Generation</h3><p>Generate videos from start-frame images.</p>", Alignment = {AlignHCenter = true}},
                 ui:Tree{ID = "VideoTree", HeaderHidden = false, MinimumSize = {500, 150}},
                 ui:HGroup{
+                    ui:Label{Text = "Video Model:", Weight = 0.15},
+                    ui:ComboBox{ID = "VideoModelCombo", Weight = 0.85},
+                },
+                ui:HGroup{
                     ui:Label{Text = "Duration (s):", Weight = 0.15},
                     ui:SpinBox{ID = "DurationSpin", Minimum = 3, Maximum = 15, Value = 5, Weight = 0.15},
-                    ui:Label{Text = "Motion prompt:", Weight = 0.1},
-                    ui:LineEdit{ID = "MotionPrompt", PlaceholderText = "Auto-filled from action", Weight = 0.6},
+                    ui:Label{Text = "CFG:", Weight = 0.08},
+                    ui:Slider{ID = "VideoCfgSlider", Minimum = 0, Maximum = 100, Value = 50, Weight = 0.42},
+                    ui:Label{ID = "VideoCfgValue", Text = "0.50", Weight = 0.2},
+                },
+                ui:HGroup{
+                    ui:Label{Text = "Motion prompt:", Weight = 0.15},
+                    ui:LineEdit{ID = "MotionPrompt", PlaceholderText = "Auto-filled from action", Weight = 0.85},
+                },
+                ui:HGroup{
+                    ui:Label{Text = "Negative prompt:", Weight = 0.15},
+                    ui:LineEdit{ID = "VideoNegativePrompt", PlaceholderText = "(optional) blurry, low-quality, watermark...", Weight = 0.85},
                 },
                 ui:HGroup{
                     ui:Button{ID = "GenAllVideos", Text = "Generate All Videos", Weight = 0.3},
@@ -938,6 +1034,7 @@ local itm = win:GetItems()
 local imageProviders = {
     {id = "freepik",      name = "Freepik Mystic (Cloud)"},
     {id = "grok",         name = "Grok Imagine (Cloud)"},
+    {id = "openai",       name = "GPT Image 2 (OpenAI)"},
     {id = "comfyui_flux", name = "Flux Kontext (Local ComfyUI)"},
 }
 local videoProviders = {
@@ -980,7 +1077,7 @@ end
 -- Helper: update field visibility based on provider type
 local function updateImageProviderFields()
     local id = getImageProviderId(itm.ImageProviderCombo.CurrentIndex)
-    local isCloud = (id == "freepik" or id == "grok")
+    local isCloud = (id == "freepik" or id == "grok" or id == "openai")
     itm.ImageApiKey.Enabled = isCloud
     itm.ImageServerUrl.Enabled = not isCloud
     if id == "freepik" then
@@ -989,6 +1086,9 @@ local function updateImageProviderFields()
     elseif id == "grok" then
         itm.ImageApiKey.PlaceholderText = "xAI API key..."
         itm.ImageApiKey.Text = config.providers.grok.apiKey or ""
+    elseif id == "openai" then
+        itm.ImageApiKey.PlaceholderText = "OpenAI API key (sk-...)..."
+        itm.ImageApiKey.Text = config.providers.openai and config.providers.openai.apiKey or ""
     else
         itm.ImageApiKey.PlaceholderText = "(not needed)"
         itm.ImageApiKey.Text = ""
@@ -1046,6 +1146,10 @@ setComboToProvider(itm.LipSyncProviderCombo, lipsyncProviders, config.lipsyncPro
 itm.ImageServerUrl.Text = config.providers.comfyui.serverUrl
 itm.VideoServerUrl.Text = config.providers.comfyui.serverUrl
 itm.VoiceServerUrl.Text = config.providers.voicebox and config.providers.voicebox.serverUrl or "http://127.0.0.1:17493"
+-- Freepik webhook key (optional, for future use)
+if itm.FreepikWebhookKey then
+    itm.FreepikWebhookKey.Text = (config.providers.freepik and config.providers.freepik.webhookKey) or ""
+end
 
 -- Initialize episode fields
 itm.EpisodeNumber.Text = config.episodeNumber or ""
@@ -1063,10 +1167,100 @@ itm.ModelCombo:AddItem("fluid")
 itm.ModelCombo:AddItem("zen")
 itm.ModelCombo:AddItem("flexible")
 itm.ModelCombo:AddItem("super_real")
+itm.ModelCombo:AddItem("editorial_portraits")
 
 itm.AspectCombo:AddItem("widescreen_16_9")
 itm.AspectCombo:AddItem("classic_4_3")
 itm.AspectCombo:AddItem("square_1_1")
+
+-- Freepik Mystic per-model combos
+for _, v in ipairs({"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}) do
+    itm.FreepikEngineCombo:AddItem(v)
+end
+for _, v in ipairs({"1k", "2k", "4k"}) do
+    itm.FreepikResolutionCombo:AddItem(v)
+end
+
+-- OpenAI gpt-image-2 per-model combos
+for _, v in ipairs({"auto", "low", "medium", "high"}) do
+    itm.OpenAIQualityCombo:AddItem(v)
+end
+for _, v in ipairs({"auto", "1024x1024", "1536x1024", "1024x1536"}) do
+    itm.OpenAISizeCombo:AddItem(v)
+end
+for _, v in ipairs({"png", "jpeg", "webp"}) do
+    itm.OpenAIFormatCombo:AddItem(v)
+end
+for _, v in ipairs({"auto", "opaque", "transparent"}) do
+    itm.OpenAIBgCombo:AddItem(v)
+end
+
+-- Helper: set a combo box to match a string value
+local function setComboToValue(combo, value)
+    for i = 0, combo.Count - 1 do
+        if combo.ItemText[i] == value then
+            combo.CurrentIndex = i
+            return
+        end
+    end
+    combo.CurrentIndex = 0
+end
+
+-- Initialize per-model option values from config
+setComboToValue(itm.FreepikEngineCombo, config.freepikEngine)
+setComboToValue(itm.FreepikResolutionCombo, config.freepikResolution)
+itm.FreepikStructureSlider.Value = config.freepikStructureStrength or 50
+itm.FreepikStructureValue.Text = tostring(itm.FreepikStructureSlider.Value)
+setComboToValue(itm.OpenAIQualityCombo, config.openaiQuality)
+setComboToValue(itm.OpenAISizeCombo, config.openaiSize)
+setComboToValue(itm.OpenAIFormatCombo, config.openaiOutputFormat)
+setComboToValue(itm.OpenAIBgCombo, config.openaiBackground)
+
+-- Video model selector (Step 6)
+local videoModels = {
+    "kling-v3-omni",
+    "kling-v2-5-pro",
+    "kling-v2-6-pro",
+    "kling-o1-pro",
+    "seedance-pro-1080p",
+    "minimax-hailuo-2-3",
+    "wan-v2-6-1080p",
+}
+for _, vm in ipairs(videoModels) do
+    itm.VideoModelCombo:AddItem(vm)
+end
+setComboToValue(itm.VideoModelCombo, config.videoModel or "kling-v3-omni")
+
+-- Video CFG slider (0-100 UI → 0.0-1.0 API). Store as float in config.
+itm.VideoCfgSlider.Value = math.floor((config.videoCfgScale or 0.5) * 100 + 0.5)
+itm.VideoCfgValue.Text = string.format("%.2f", (itm.VideoCfgSlider.Value or 50) / 100.0)
+
+-- Video negative prompt
+itm.VideoNegativePrompt.Text = config.videoNegativePrompt or ""
+
+-- Show/hide provider-specific option rows based on image provider.
+-- Fusion has no Visible property on HGroup in every Resolve version — we
+-- toggle Enabled + use StyleSheet display:none as a fallback.
+local function refreshProviderControls()
+    local pid = config.imageProvider or "freepik"
+    local isFreepik = (pid == "freepik")
+    local isOpenAI  = (pid == "openai")
+
+    local function setRow(row, on)
+        if not row then return end
+        pcall(function() row.Hidden = not on end)
+        pcall(function() row.Enabled = on end)
+    end
+    setRow(itm.FreepikEngineRow,     isFreepik)
+    setRow(itm.FreepikResolutionRow, isFreepik)
+    setRow(itm.FreepikStructureRow,  isFreepik)
+    setRow(itm.OpenAIQualityRow,     isOpenAI)
+    setRow(itm.OpenAISizeRow,        isOpenAI)
+    setRow(itm.OpenAIFormatRow,      isOpenAI)
+    setRow(itm.OpenAIBgRow,          isOpenAI)
+end
+
+refreshProviderControls()
 
 itm.ResCombo:AddItem("1920x1080")
 itm.ResCombo:AddItem("3840x2160")
@@ -1115,12 +1309,18 @@ local function onNext()
             config.providers.freepik.apiKey = itm.ImageApiKey.Text
         elseif imgId == "grok" then
             config.providers.grok.apiKey = itm.ImageApiKey.Text
+        elseif imgId == "openai" then
+            config.providers.openai.apiKey = itm.ImageApiKey.Text
         end
         local vidId = config.videoProvider
         if vidId == "freepik" then
             config.providers.freepik.apiKey = itm.VideoApiKey.Text
         elseif vidId == "grok" then
             config.providers.grok.apiKey = itm.VideoApiKey.Text
+        end
+        -- Freepik webhook key (always saved when present, independent of provider)
+        if itm.FreepikWebhookKey and itm.FreepikWebhookKey.Text then
+            config.providers.freepik.webhookKey = itm.FreepikWebhookKey.Text
         end
         local voiceId = config.voiceProvider
         if voiceId == "elevenlabs" then
@@ -1144,6 +1344,32 @@ local function onNext()
         config.episodeTitle = itm.EpisodeTitle.Text or ""
         saveConfig()
     end
+
+    -- Save Step 4 (Style + generation settings) on Next
+    if currentStep == 4 then
+        config.model = itm.ModelCombo.CurrentText or "realism"
+        config.aspectRatio = itm.AspectCombo.CurrentText or "widescreen_16_9"
+        config.detailing = itm.DetailSlider.Value or 33
+        -- Freepik Mystic per-model options
+        config.freepikEngine = itm.FreepikEngineCombo.CurrentText or "automatic"
+        config.freepikResolution = itm.FreepikResolutionCombo.CurrentText or "2k"
+        config.freepikStructureStrength = itm.FreepikStructureSlider.Value or 50
+        -- OpenAI gpt-image-2 per-model options
+        config.openaiQuality = itm.OpenAIQualityCombo.CurrentText or "auto"
+        config.openaiSize = itm.OpenAISizeCombo.CurrentText or "auto"
+        config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or "png"
+        config.openaiBackground = itm.OpenAIBgCombo.CurrentText or "auto"
+        saveConfig()
+    end
+
+    -- Save Step 6 (Video generation settings) on Next
+    if currentStep == 6 then
+        config.videoModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
+        config.videoCfgScale = (itm.VideoCfgSlider.Value or 50) / 100.0
+        config.videoNegativePrompt = itm.VideoNegativePrompt.Text or ""
+        saveConfig()
+    end
+
     if currentStep < #STEPS then
         showStep(currentStep + 1)
     end
@@ -1207,6 +1433,17 @@ function win.On.STS_Main.Close(ev) onClose() end
 
 function win.On.ImageProviderCombo.CurrentIndexChanged(ev)
     updateImageProviderFields()
+    -- Record the new choice so refreshProviderControls() can react before Next is pressed
+    config.imageProvider = getImageProviderId(itm.ImageProviderCombo.CurrentIndex)
+    pcall(refreshProviderControls)
+end
+
+function win.On.FreepikStructureSlider.ValueChanged(ev)
+    itm.FreepikStructureValue.Text = tostring(itm.FreepikStructureSlider.Value)
+end
+
+function win.On.VideoCfgSlider.ValueChanged(ev)
+    itm.VideoCfgValue.Text = string.format("%.2f", (itm.VideoCfgSlider.Value or 50) / 100.0)
 end
 
 function win.On.VideoProviderCombo.CurrentIndexChanged(ev)
@@ -1291,7 +1528,7 @@ function win.On.TestImageProvider.Clicked(ev)
     local key = (itm.ImageApiKey.Text or ""):match("^%s*(.-)%s*$")
     local url = itm.ImageServerUrl.Text or ""
     -- For cloud providers, require API key
-    if (pid == "freepik" or pid == "grok") and key == "" then
+    if (pid == "freepik" or pid == "grok" or pid == "openai") and key == "" then
         itm.ImageProviderStatus.Text = "No key"
         itm.ImageProviderStatus.StyleSheet = "color: orange;"
         return
@@ -1301,6 +1538,8 @@ function win.On.TestImageProvider.Clicked(ev)
             config.providers.freepik.apiKey = key
         elseif pid == "grok" then
             config.providers.grok.apiKey = key
+        elseif pid == "openai" then
+            config.providers.openai.apiKey = key
         end
         config.providers.comfyui.serverUrl = url
         config.imageProvider = pid
@@ -1626,6 +1865,11 @@ function win.On.GenAllImages.Clicked(ev)
         itm.ImageProgress.StyleSheet = "color: red;"
         return
     end
+    if imgPid == "openai" and (config.providers.openai and config.providers.openai.apiKey or "") == "" then
+        itm.ImageProgress.Text = "Set OpenAI API key first (Step 1)!"
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
     if not screenplayData then
         itm.ImageProgress.Text = "Parse a screenplay first (Step 2)!"
         itm.ImageProgress.StyleSheet = "color: red;"
@@ -1648,7 +1892,22 @@ function win.On.GenAllImages.Clicked(ev)
         imgApiKey = config.providers.freepik.apiKey or ""
     elseif imgPid == "grok" then
         imgApiKey = config.providers.grok.apiKey or ""
+    elseif imgPid == "openai" then
+        imgApiKey = config.providers.openai and config.providers.openai.apiKey or ""
     end
+
+    -- Persist the latest Step 4 picks into config before Python reads them
+    config.model = model
+    config.aspectRatio = aspect
+    config.detailing = detail
+    config.freepikEngine = itm.FreepikEngineCombo.CurrentText or config.freepikEngine
+    config.freepikResolution = itm.FreepikResolutionCombo.CurrentText or config.freepikResolution
+    config.freepikStructureStrength = itm.FreepikStructureSlider.Value or config.freepikStructureStrength
+    config.openaiQuality = itm.OpenAIQualityCombo.CurrentText or config.openaiQuality
+    config.openaiSize = itm.OpenAISizeCombo.CurrentText or config.openaiSize
+    config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or config.openaiOutputFormat
+    config.openaiBackground = itm.OpenAIBgCombo.CurrentText or config.openaiBackground
+    saveConfig()
 
     -- Write API key to temp file
     local keyfile = os.tmpname()
@@ -1704,7 +1963,14 @@ function win.On.GenAllImages.Clicked(ev)
         .. '    defaults = GenerationDefaults(\n'
         .. '        freepik_model="' .. model .. '",\n'
         .. '        aspect_ratio="' .. aspect .. '",\n'
-        .. '        creative_detailing=' .. tostring(detail) .. '\n'
+        .. '        creative_detailing=' .. tostring(detail) .. ',\n'
+        .. '        freepik_engine="' .. (config.freepikEngine or "automatic") .. '",\n'
+        .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
+        .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
+        .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
+        .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
+        .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
+        .. '        openai_background="' .. (config.openaiBackground or "auto") .. '",\n'
         .. '    )\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
         .. '    results = generate_images_for_screenplay(\n'
@@ -1878,6 +2144,8 @@ function win.On.RetryFailedImages.Clicked(ev)
         imgApiKey = config.providers.freepik.apiKey or ""
     elseif imgPid == "grok" then
         imgApiKey = config.providers.grok.apiKey or ""
+    elseif imgPid == "openai" then
+        imgApiKey = config.providers.openai and config.providers.openai.apiKey or ""
     end
     local keyfile = os.tmpname()
     local kf = io.open(keyfile, "w")
@@ -1943,7 +2211,14 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '    defaults = GenerationDefaults(\n'
         .. '        freepik_model="' .. model .. '",\n'
         .. '        aspect_ratio="' .. aspect .. '",\n'
-        .. '        creative_detailing=' .. tostring(detail) .. ')\n'
+        .. '        creative_detailing=' .. tostring(detail) .. ',\n'
+        .. '        freepik_engine="' .. (config.freepikEngine or "automatic") .. '",\n'
+        .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
+        .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
+        .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
+        .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
+        .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
+        .. '        openai_background="' .. (config.openaiBackground or "auto") .. '")\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
         .. '    failed_keys = set(json.loads(\'' .. failedKeysJson:gsub("'", "\\'") .. '\'))\n'
         .. '    paths = {}\n'
@@ -2174,6 +2449,12 @@ function win.On.GenAllVideos.Clicked(ev)
     local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
     local duration = itm.DurationSpin.Value or 5
 
+    -- Persist Step 6 picks into config before Python reads them
+    config.videoModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
+    config.videoCfgScale = (itm.VideoCfgSlider.Value or 50) / 100.0
+    config.videoNegativePrompt = itm.VideoNegativePrompt.Text or ""
+    saveConfig()
+
     -- Resolve the API key for the selected video provider
     local vidApiKey = ""
     if vidPid == "freepik" then
@@ -2188,6 +2469,7 @@ function win.On.GenAllVideos.Clicked(ev)
     if kf then kf:write(vidApiKey); kf:close() end
 
     local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeNegative = (config.videoNegativePrompt or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
     local code = 'import json, traceback, time, os, glob, re\n'
         .. 'try:\n'
@@ -2195,6 +2477,7 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
         .. '    from script_to_screen.api.registry import create_video_provider\n'
         .. '    from script_to_screen.pipeline.video_gen import generate_videos_for_screenplay\n'
+        .. '    from script_to_screen.config import GenerationDefaults\n'
         .. '    script_path = "' .. safePath .. '"\n'
         .. '    if script_path.lower().endswith(".pdf"):\n'
         .. '        screenplay = parse_pdf(script_path)\n'
@@ -2205,6 +2488,11 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '        "' .. vidPid .. '",\n'
         .. '        api_key=api_key,\n'
         .. '        server_url="' .. safeServerUrl .. '",\n'
+        .. '    )\n'
+        .. '    defaults = GenerationDefaults(\n'
+        .. '        video_model="' .. (config.videoModel or "kling-v3-omni") .. '",\n'
+        .. '        video_cfg_scale=' .. tostring(config.videoCfgScale or 0.5) .. ',\n'
+        .. '        video_negative_prompt="' .. safeNegative .. '",\n'
         .. '    )\n'
         .. '    # Build image_paths from generated images dir\n'
         .. '    image_dir = "' .. safeOutput .. '/images"\n'
@@ -2218,6 +2506,7 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '    results = generate_videos_for_screenplay(\n'
         .. '        screenplay, provider, image_paths,\n'
         .. '        "' .. safeOutput .. '",\n'
+        .. '        defaults=defaults,\n'
         .. '        project_slug="' .. projectSlug .. '",\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'

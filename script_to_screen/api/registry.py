@@ -208,6 +208,24 @@ def _register_builtins():
     except ImportError:
         logger.debug("Voicebox provider not available (missing voicebox_provider module)")
 
+    # OpenAI gpt-image-2 (cloud image generation)
+    try:
+        from .openai_image_provider import OpenAIImageProvider
+
+        register_image_provider(
+            ProviderInfo(
+                id="openai",
+                name="GPT Image 2 (OpenAI)",
+                category="image",
+                requires_api_key=True,
+                requires_server_url=False,
+                description="Cloud image generation via OpenAI gpt-image-2",
+            ),
+            lambda api_key="", **kw: OpenAIImageProvider(api_key, **kw),
+        )
+    except ImportError:
+        logger.debug("OpenAI image provider not available")
+
     # Grok Imagine (xAI cloud) providers
     try:
         from .grok_provider import GrokImageProvider, GrokVideoProvider

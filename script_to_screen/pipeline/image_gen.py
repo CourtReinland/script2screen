@@ -180,6 +180,15 @@ def generate_images_for_screenplay(
                 aspect_ratio=defaults.aspect_ratio,
                 model=defaults.freepik_model,
                 creative_detailing=defaults.creative_detailing,
+                # Freepik Mystic per-model options (ignored by other providers)
+                freepik_engine=defaults.freepik_engine,
+                freepik_resolution=defaults.freepik_resolution,
+                freepik_structure_strength=defaults.freepik_structure_strength,
+                # OpenAI per-model options (ignored by other providers)
+                openai_quality=defaults.openai_quality,
+                openai_size=defaults.openai_size,
+                openai_output_format=defaults.openai_output_format,
+                openai_background=defaults.openai_background,
             )
             logger.info(f"[{shot_key}] Queued as task {task_id}")
 
@@ -267,6 +276,14 @@ def regenerate_single_image(
             aspect_ratio=defaults.aspect_ratio,
             model=defaults.freepik_model,
             creative_detailing=defaults.creative_detailing,
+            # Per-model passthrough (ignored by providers that don't support these)
+            freepik_engine=defaults.freepik_engine,
+            freepik_resolution=defaults.freepik_resolution,
+            freepik_structure_strength=defaults.freepik_structure_strength,
+            openai_quality=defaults.openai_quality,
+            openai_size=defaults.openai_size,
+            openai_output_format=defaults.openai_output_format,
+            openai_background=defaults.openai_background,
         )
 
         result = poll_until_complete(

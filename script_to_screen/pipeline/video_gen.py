@@ -128,6 +128,10 @@ def generate_videos_for_screenplay(
                 prompt=motion_prompt,
                 start_image_path=image_path,
                 duration=duration,
+                # Pass through model selection and shared params
+                video_model=getattr(defaults, "video_model", "kling-v3-omni"),
+                cfg_scale=getattr(defaults, "video_cfg_scale", 0.5),
+                negative_prompt=getattr(defaults, "video_negative_prompt", ""),
             )
 
             result = poll_until_complete(
@@ -184,6 +188,9 @@ def regenerate_single_video(
     provider: VideoProvider,
     output_dir: str,
     duration: int = 5,
+    video_model: str = "kling-v3-omni",
+    cfg_scale: float = 0.5,
+    negative_prompt: str = "",
 ) -> Optional[str]:
     """Regenerate a single video by shot key."""
     videos_dir = ensure_dir(os.path.join(output_dir, "videos"))
@@ -193,6 +200,9 @@ def regenerate_single_video(
             prompt=motion_prompt,
             start_image_path=image_path,
             duration=duration,
+            video_model=video_model,
+            cfg_scale=cfg_scale,
+            negative_prompt=negative_prompt,
         )
 
         result = poll_until_complete(
