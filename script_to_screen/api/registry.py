@@ -124,11 +124,16 @@ def _register_builtins():
     register_video_provider(
         ProviderInfo(
             id="freepik",
-            name="Kling 3 Omni (Cloud via Freepik)",
+            name="Freepik (Cloud)",
             category="video",
             requires_api_key=True,
             requires_server_url=False,
-            description="Cloud video generation via Freepik/Kling API",
+            description=(
+                "Cloud video generation via Freepik. Supports multiple "
+                "models (Kling v3 Omni, Kling v2.5/v2.6 Pro, Kling O1 Pro, "
+                "Seedance Pro, MiniMax Hailuo, Wan v2.6) — choose the "
+                "model in Step 8."
+            ),
         ),
         lambda api_key="", **kw: FreepikVideoProvider(api_key, **kw),
     )

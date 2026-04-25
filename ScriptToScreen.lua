@@ -1111,7 +1111,7 @@ local imageProviders = {
     {id = "comfyui_flux", name = "Flux Kontext (Local ComfyUI)"},
 }
 local videoProviders = {
-    {id = "freepik",      name = "Kling 3 Omni (Cloud via Freepik)"},
+    {id = "freepik",      name = "Freepik (Cloud — Kling, Seedance, MiniMax, Wan)"},
     {id = "grok",         name = "Grok Imagine Video (Cloud)"},
     {id = "comfyui_ltx",  name = "LTX 2.3 (Local ComfyUI)"},
 }
