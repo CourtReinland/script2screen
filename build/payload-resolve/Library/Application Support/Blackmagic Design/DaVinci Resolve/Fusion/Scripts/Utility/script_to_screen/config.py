@@ -49,26 +49,9 @@ class APIConfig:
 
 @dataclass
 class GenerationDefaults:
-    freepik_model: str = "realism"  # realism, fluid, zen, flexible, super_real, editorial_portraits (Mystic style only)
+    freepik_model: str = "realism"  # realism, fluid, zen, flexible, super_real
     aspect_ratio: str = "widescreen_16_9"
     creative_detailing: int = 33
-    # Which Freepik image API to dispatch to. See IMAGE_ENDPOINTS in
-    # freepik_client.py. Defaults to "mystic" so existing configs keep
-    # working unchanged.
-    freepik_image_api: str = "mystic"              # mystic | flux-dev | flux-pro-v1-1 | flux-2-pro | flux-2-turbo | flux-2-klein | flux-kontext-pro | hyperflux | seedream-4 | seedream-v4-5 | z-image-turbo | runway
-    # Freepik Mystic per-model options (only honored when freepik_image_api == "mystic")
-    freepik_engine: str = "automatic"              # automatic | magnific_sparkle | magnific_illusio | magnific_sharpy
-    freepik_resolution: str = "2k"                 # 1k | 2k | 4k
-    freepik_structure_strength: int = 50           # 0-100 (only when structure reference is set)
-    # OpenAI gpt-image-2 per-model options
-    openai_quality: str = "auto"                   # low | medium | high | auto
-    openai_size: str = "auto"                      # 1024x1024 | 1536x1024 | 1024x1536 | auto
-    openai_output_format: str = "png"              # png | jpeg | webp
-    openai_background: str = "auto"                # transparent | opaque | auto
-    # Video generation
-    video_model: str = "kling-v3-omni"             # see VIDEO_ENDPOINTS in freepik_client
-    video_cfg_scale: float = 0.5                   # 0.0-1.0
-    video_negative_prompt: str = ""
     video_duration_dialogue: int = 5
     video_duration_action: int = 3
     video_duration_establishing: int = 8

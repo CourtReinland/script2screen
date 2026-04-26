@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>ScriptToScreen v1.1.0</title>
+    <welcome>
+        <html-content><![CDATA[
+<html><body style="font-family: -apple-system, Helvetica; padding: 20px;">
+<h2>ScriptToScreen v1.1.0</h2>
+<p>AI Filmmaking Plugin for DaVinci Resolve</p>
+<p>This installer will set up:</p>
+<ul>
+<li><b>ScriptToScreen wizard</b> + all standalone tools in DaVinci Resolve</li>
+<li><b>Python virtual environment</b> with AI packages</li>
+<li><b>MLX-Audio</b> for local voice synthesis (Apple Silicon)</li>
+<li><b>Homebrew</b> and <b>ffmpeg</b> if not already installed</li>
+</ul>
+<p style="color: #666; font-size: 0.9em;">
+After installation, restart DaVinci Resolve and go to<br/>
+<b>Workspace &rarr; Scripts &rarr; ScriptToScreen</b>
+</p>
+<p style="color: #666; font-size: 0.85em;">
+Install log: ~/Library/Logs/ScriptToScreen/install.log
+</p>
+</body></html>
+        ]]></html-content>
+    </welcome>
+    <conclusion>
+        <html-content><![CDATA[
+<html><body style="font-family: -apple-system, Helvetica; padding: 20px;">
+<h2>Installation Complete!</h2>
+<p><b>Next steps:</b></p>
+<ol>
+<li>Restart DaVinci Resolve</li>
+<li>Go to <b>Workspace &rarr; Scripts &rarr; ScriptToScreen</b></li>
+<li>Configure your API keys in the wizard's Step 1:
+    <ul>
+    <li>Grok (xAI) &mdash; <a href="https://x.ai">x.ai</a></li>
+    <li>ElevenLabs &mdash; <a href="https://elevenlabs.io">elevenlabs.io</a></li>
+    <li>Kling AI &mdash; <a href="https://klingai.com">klingai.com</a></li>
+    </ul>
+</li>
+</ol>
+<p style="color: #666; font-size: 0.85em;">
+If something didn't work, check the log at:<br/>
+~/Library/Logs/ScriptToScreen/install.log
+</p>
+</body></html>
+        ]]></html-content>
+    </conclusion>
+    <options customize="never" require-scripts="false"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="resolve-scripts"/>
+            <line choice="user-package"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="resolve-scripts" visible="false">
+        <pkg-ref id="com.scripttoscreensts.pkg.resolve-scripts"/>
+    </choice>
+    <choice id="user-package" visible="false">
+        <pkg-ref id="com.scripttoscreensts.pkg.user-package"/>
+    </choice>
+    <pkg-ref id="com.scripttoscreensts.pkg.resolve-scripts" version="1.1.0" onConclusion="none">resolve-scripts.pkg</pkg-ref>
+    <pkg-ref id="com.scripttoscreensts.pkg.user-package" version="1.1.0" onConclusion="none">user-package.pkg</pkg-ref>
+</installer-gui-script>

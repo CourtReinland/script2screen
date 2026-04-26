@@ -122,21 +122,6 @@ def build_image_prompt(
     return prompt
 
 
-def build_all_image_prompts(screenplay: Screenplay) -> dict[str, str]:
-    """Build the auto-prompt for every shot in the screenplay.
-
-    Returns a dict keyed by shot_key ("s{scene}_sh{shot}") → prompt string.
-    Used by the Step 5 "Review Image Prompts" wizard page to populate its
-    tree in a single Python call.
-    """
-    out: dict[str, str] = {}
-    for scene in screenplay.scenes:
-        for si, shot in enumerate(scene.shots):
-            shot_key = f"s{scene.index}_sh{si}"
-            out[shot_key] = build_image_prompt(shot, scene, screenplay, shot_idx=si)
-    return out
-
-
 def generate_images_for_screenplay(
     screenplay: Screenplay,
     provider: ImageProvider,
@@ -195,17 +180,6 @@ def generate_images_for_screenplay(
                 aspect_ratio=defaults.aspect_ratio,
                 model=defaults.freepik_model,
                 creative_detailing=defaults.creative_detailing,
-                # Freepik Mystic per-model options (ignored by other providers)
-                freepik_engine=defaults.freepik_engine,
-                freepik_resolution=defaults.freepik_resolution,
-                freepik_structure_strength=defaults.freepik_structure_strength,
-                # Freepik multi-API dispatch (mystic / flux-* / seedream-* / ...)
-                freepik_image_api=defaults.freepik_image_api,
-                # OpenAI per-model options (ignored by other providers)
-                openai_quality=defaults.openai_quality,
-                openai_size=defaults.openai_size,
-                openai_output_format=defaults.openai_output_format,
-                openai_background=defaults.openai_background,
             )
             logger.info(f"[{shot_key}] Queued as task {task_id}")
 
@@ -293,15 +267,6 @@ def regenerate_single_image(
             aspect_ratio=defaults.aspect_ratio,
             model=defaults.freepik_model,
             creative_detailing=defaults.creative_detailing,
-            # Per-model passthrough (ignored by providers that don't support these)
-            freepik_engine=defaults.freepik_engine,
-            freepik_resolution=defaults.freepik_resolution,
-            freepik_structure_strength=defaults.freepik_structure_strength,
-            freepik_image_api=defaults.freepik_image_api,
-            openai_quality=defaults.openai_quality,
-            openai_size=defaults.openai_size,
-            openai_output_format=defaults.openai_output_format,
-            openai_background=defaults.openai_background,
         )
 
         result = poll_until_complete(

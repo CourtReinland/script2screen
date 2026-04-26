@@ -29,6 +29,26 @@ VIDEO_ENDPOINTS: dict[str, tuple[str, str]] = {
 MYSTIC_ENGINES = {"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}
 MYSTIC_RESOLUTIONS = {"1k", "2k", "4k"}
 
+# Multi-model image generation dispatch.
+# Each entry maps an internal API id → its REST submission path (relative to
+# BASE_URL). The status-check path is always "<submit_path>/{task_id}".
+# Mystic is special-cased above this layer because it accepts a richer
+# parameter set (engine, resolution, structure reference, etc.).
+IMAGE_ENDPOINTS = {
+    "mystic":           "/ai/mystic",
+    "flux-dev":         "/ai/text-to-image/flux-dev",
+    "flux-pro-v1-1":    "/ai/text-to-image/flux-pro-v1-1",
+    "flux-2-pro":       "/ai/text-to-image/flux-2-pro",
+    "flux-2-turbo":     "/ai/text-to-image/flux-2-turbo",
+    "flux-2-klein":     "/ai/text-to-image/flux-2-klein",
+    "flux-kontext-pro": "/ai/text-to-image/flux-kontext-pro",
+    "hyperflux":        "/ai/text-to-image/hyperflux",
+    "seedream-4":       "/ai/text-to-image/seedream-4",
+    "seedream-v4-5":    "/ai/text-to-image/seedream-v4-5",
+    "z-image-turbo":    "/ai/text-to-image/z-image-turbo",
+    "runway":           "/ai/text-to-image/runway",
+}
+
 
 class FreepikClient:
     """Client for Freepik AI generation APIs."""
@@ -86,67 +106,109 @@ class FreepikClient:
         structure_strength: int = 50,
         structure_reference_path: Optional[str] = None,
         webhook_url: Optional[str] = None,
+        image_api: str = "mystic",
+        seed: Optional[int] = None,
     ) -> str:
         """
-        Generate an image using Freepik Mystic API.
+        Generate an image via one of Freepik's image-generation APIs.
+
+        Dispatches to /ai/mystic or /ai/text-to-image/<model> based on
+        ``image_api``. Mystic accepts a rich parameter set (engine,
+        resolution, structure reference, style model). Other APIs accept
+        only the basics (prompt, aspect_ratio, optional seed/webhook).
 
         Args:
             prompt: Text description.
             style_reference_path: Optional style reference image (local path).
-            style_adherence: 0-100, how strongly to match style reference.
-            model: Mystic model (realism, fluid, zen, flexible, super_real, editorial_portraits).
+                Only honored by Mystic.
+            style_adherence: 0-100. Mystic only.
+            model: Mystic style (realism / fluid / zen / flexible /
+                super_real / editorial_portraits). Mystic only.
             aspect_ratio: Internal aspect ratio slug.
-            creative_detailing: 0-100, detail enhancement.
-            engine: 'automatic' | 'magnific_sparkle' | 'magnific_illusio' | 'magnific_sharpy'.
-            resolution: '1k' | '2k' | '4k'.
-            structure_strength: 0-100 (only applies when structure_reference_path is set).
-            structure_reference_path: Optional structure reference image (local path).
-            webhook_url: If set, Freepik posts status updates here instead of
-                needing to be polled. Still returns a task_id for polling as fallback.
+            creative_detailing: 0-100. Mystic only.
+            engine: Mystic engine. Mystic only.
+            resolution: '1k' | '2k' | '4k'. Mystic only.
+            structure_strength: 0-100. Mystic only.
+            structure_reference_path: Mystic only.
+            webhook_url: If set, Freepik posts status updates here.
+            image_api: One of IMAGE_ENDPOINTS keys. Defaults to ``"mystic"``
+                for backward compat with callers that don't know about the
+                multi-API dispatch.
+            seed: Optional seed for non-Mystic models.
 
         Returns:
-            task_id for polling.
+            task_id for polling. Non-Mystic task_ids are namespaced
+            ``"<image_api>:<raw_id>"`` so check_image_status can route the
+            poll back to the correct endpoint.
         """
         self.image_limiter.wait()
 
-        payload: dict = {
-            "prompt": prompt,
-            "model": model,
-            "aspect_ratio": aspect_ratio,
-            "creative_detailing": creative_detailing,
-            "filter_nsfw": False,
-        }
+        api = image_api if image_api in IMAGE_ENDPOINTS else "mystic"
+        submit_path = IMAGE_ENDPOINTS[api]
 
-        # Validate and include per-model parameters
-        if engine and engine in MYSTIC_ENGINES and engine != "automatic":
-            payload["engine"] = engine
-        if resolution and resolution in MYSTIC_RESOLUTIONS:
-            payload["resolution"] = resolution
+        if api == "mystic":
+            payload: dict = {
+                "prompt": prompt,
+                "model": model,
+                "aspect_ratio": aspect_ratio,
+                "creative_detailing": creative_detailing,
+                "filter_nsfw": False,
+            }
+            if engine and engine in MYSTIC_ENGINES and engine != "automatic":
+                payload["engine"] = engine
+            if resolution and resolution in MYSTIC_RESOLUTIONS:
+                payload["resolution"] = resolution
+            if style_reference_path:
+                payload["style_reference"] = image_to_base64(style_reference_path)
+                payload["adherence"] = style_adherence
+            if structure_reference_path:
+                payload["structure_reference"] = image_to_base64(structure_reference_path)
+                payload["structure_strength"] = max(0, min(100, structure_strength))
+            if webhook_url:
+                payload["webhook_url"] = webhook_url
 
-        if style_reference_path:
-            payload["style_reference"] = image_to_base64(style_reference_path)
-            payload["adherence"] = style_adherence
+            logger.info(
+                f"[Freepik] POST /ai/mystic  model={model}  engine={engine}  "
+                f"resolution={resolution}  aspect={aspect_ratio}"
+            )
+        else:
+            # All non-Mystic image endpoints share a minimal schema.
+            payload = {
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+            }
+            if seed is not None:
+                payload["seed"] = int(seed)
+            if webhook_url:
+                payload["webhook_url"] = webhook_url
+            logger.info(f"[Freepik] POST {submit_path}  aspect={aspect_ratio}")
 
-        if structure_reference_path:
-            payload["structure_reference"] = image_to_base64(structure_reference_path)
-            payload["structure_strength"] = max(0, min(100, structure_strength))
-
-        if webhook_url:
-            payload["webhook_url"] = webhook_url
-
-        logger.info(
-            f"[Freepik] POST /ai/mystic  model={model}  engine={engine}  "
-            f"resolution={resolution}  aspect={aspect_ratio}"
-        )
-        resp = self._post(f"{BASE_URL}/ai/mystic", payload)
+        resp = self._post(f"{BASE_URL}{submit_path}", payload)
         data = resp.get("data", resp)
-        task_id = data.get("task_id", data.get("id", ""))
-        logger.info(f"Image generation started: {task_id}")
+        raw_id = data.get("task_id", data.get("id", ""))
+
+        # Namespace non-Mystic task_ids so check_image_status can route back
+        if api == "mystic":
+            task_id = raw_id
+        else:
+            task_id = f"{api}:{raw_id}"
+        logger.info(f"Image generation started: api={api} task={task_id}")
         return task_id
 
     def check_image_status(self, task_id: str) -> dict:
-        """Check status of an image generation task."""
-        resp = self._get(f"{BASE_URL}/ai/mystic/{task_id}")
+        """Check status of an image generation task.
+
+        Mystic task_ids are unnamespaced (legacy). Non-Mystic task_ids are
+        prefixed with ``"<image_api>:"`` (set in generate_image) so we know
+        which endpoint to poll.
+        """
+        if ":" in task_id and task_id.split(":", 1)[0] in IMAGE_ENDPOINTS:
+            api, raw_id = task_id.split(":", 1)
+        else:
+            api, raw_id = "mystic", task_id
+        path = IMAGE_ENDPOINTS.get(api, IMAGE_ENDPOINTS["mystic"])
+
+        resp = self._get(f"{BASE_URL}{path}/{raw_id}")
         data = resp.get("data", resp)
         return {
             "status": data.get("status", "UNKNOWN"),

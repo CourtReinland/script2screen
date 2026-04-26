@@ -337,21 +337,20 @@ end
 -- STATE
 -- ============================================================
 
-local STEPS = {"Welcome", "Script", "Characters", "Style", "Review Images", "Images", "Review Videos", "Videos", "Voices", "Dialogue", "LipSync", "Assembly"}
+local STEPS = {"Welcome", "Script", "Characters", "Style", "Images", "Videos", "Voices", "Dialogue", "LipSync", "Assembly"}
 local currentStep = 1
 
 local config = {
     -- Provider selections
-    imageProvider = "freepik",        -- "freepik" | "grok" | "openai" | "comfyui_flux"
-    videoProvider = "freepik",        -- "freepik" | "grok" | "comfyui_ltx"
-    voiceProvider = "elevenlabs",     -- "elevenlabs" | "voicebox" | "mlx_audio"
-    lipsyncProvider = "freepik",      -- "freepik" (Kling lip sync) | "kling"
+    imageProvider = "freepik",        -- "freepik" or "comfyui_flux"
+    videoProvider = "freepik",        -- "freepik" or "comfyui_ltx"
+    voiceProvider = "elevenlabs",     -- "elevenlabs" or "voicebox"
+    lipsyncProvider = "freepik",      -- "freepik" (Kling lip sync)
     -- Per-provider credentials
     providers = {
-        freepik    = { apiKey = "", webhookKey = "" },  -- webhookKey stored for future use
+        freepik    = { apiKey = "" },
         elevenlabs = { apiKey = "" },
         grok       = { apiKey = "" },
-        openai     = { apiKey = "" },
         comfyui    = { serverUrl = "http://127.0.0.1:8188" },
         voicebox   = { serverUrl = "http://127.0.0.1:17493" },
         kling      = { apiKey = "" },
@@ -359,28 +358,10 @@ local config = {
     -- Legacy (kept for backward compat)
     freepikKey = "",
     elevenlabsKey = "",
-    -- Generation settings (image — cross-provider)
-    model = "realism",                -- Freepik Mystic style sub-model
+    -- Generation settings
+    model = "realism",
     aspectRatio = "widescreen_16_9",
     detailing = 33,
-    -- Which Freepik image API to dispatch to. See IMAGE_ENDPOINTS in
-    -- freepik_client.py — mystic / flux-* / seedream-* / hyperflux /
-    -- z-image-turbo / runway. Defaults to "mystic" so existing configs
-    -- keep working unchanged.
-    freepikImageApi = "mystic",
-    -- Freepik Mystic per-model options (only honored when freepikImageApi == "mystic")
-    freepikEngine = "automatic",      -- automatic | magnific_sparkle | magnific_illusio | magnific_sharpy
-    freepikResolution = "2k",         -- 1k | 2k | 4k
-    freepikStructureStrength = 50,    -- 0-100
-    -- OpenAI gpt-image-2 per-model options
-    openaiQuality = "auto",           -- low | medium | high | auto
-    openaiSize = "auto",              -- 1024x1024 | 1536x1024 | 1024x1536 | auto
-    openaiOutputFormat = "png",       -- png | jpeg | webp
-    openaiBackground = "auto",        -- transparent | opaque | auto
-    -- Video generation settings
-    videoModel = "kling-v3-omni",     -- see freepik_client.VIDEO_ENDPOINTS
-    videoCfgScale = 0.5,              -- 0.0-1.0
-    videoNegativePrompt = "",
     -- Episode info
     episodeNumber = "",
     episodeTitle = "",
@@ -389,22 +370,10 @@ local config = {
 local screenplayData = nil -- parsed screenplay (Lua table from JSON)
 local characterImages = {} -- characterName -> imagePath
 local characterVoices = {} -- characterName -> voiceId
-local generatedImages = {} -- shotKey (s{N}_sh{M}) -> imagePath
-local failedImages = {}    -- shotKey (s{N}_sh{M}) -> error message
+local generatedImages = {} -- shotKey -> imagePath
 local generatedVideos = {} -- shotKey -> videoPath
 local generatedAudio = {}  -- dialogueKey -> audioPath
 local lipSyncedVideos = {} -- shotKey -> videoPath
-
--- Prompt review state (Step 5 Review Images + Step 7 Review Videos).
--- Overrides live in memory and win at generation time (passed as
--- custom_prompts=). Approval flags are advisory — they track whether the
--- user has explicitly confirmed the prompt for that shot.
-local autoImagePrompts = {}       -- shotKey -> auto-generated prompt (from build_all_image_prompts)
-local imagePromptOverrides = {}   -- shotKey -> user-edited prompt (missing = use auto)
-local imagePromptApproved = {}    -- shotKey -> true when approved by user
-local autoVideoPrompts = {}       -- shotKey -> auto-generated motion prompt
-local videoPromptOverrides = {}   -- shotKey -> user-edited motion prompt
-local videoPromptApproved = {}    -- shotKey -> true when approved
 
 -- Derive project slug from current Resolve project name
 local projectSlug = "default"
@@ -440,10 +409,6 @@ end
 -- Load saved config
 local configDir = homeDir .. "/Library/Application Support/ScriptToScreen"
 local configPath = configDir .. "/config.json"
--- Global character library: persists character reference images across projects.
--- Keyed by normalized (uppercase, trimmed) character name so recurring
--- characters in episodic shows auto-populate their ref image.
-local charLibraryPath = configDir .. "/character_library.json"
 do
     local f = io.open(configPath, "r")
     if f then
@@ -460,7 +425,6 @@ do
             if saved.providers then
                 if saved.providers.freepik then
                     config.providers.freepik.apiKey = saved.providers.freepik.apiKey or ""
-                    config.providers.freepik.webhookKey = saved.providers.freepik.webhookKey or ""
                 end
                 if saved.providers.elevenlabs then
                     config.providers.elevenlabs.apiKey = saved.providers.elevenlabs.apiKey or ""
@@ -470,9 +434,6 @@ do
                 end
                 if saved.providers.grok then
                     config.providers.grok.apiKey = saved.providers.grok.apiKey or ""
-                end
-                if saved.providers.openai then
-                    config.providers.openai.apiKey = saved.providers.openai.apiKey or ""
                 end
                 if saved.providers.kling then
                     config.providers.kling.apiKey = saved.providers.kling.apiKey or ""
@@ -491,30 +452,10 @@ do
             -- Legacy fields (kept for compat)
             config.freepikKey = config.providers.freepik.apiKey
             config.elevenlabsKey = config.providers.elevenlabs.apiKey
-            -- Generation settings (image)
+            -- Generation settings
             config.model = saved.model or "realism"
             config.aspectRatio = saved.aspectRatio or "widescreen_16_9"
             config.detailing = saved.detailing or 33
-            -- Which Freepik image API to dispatch to (mystic / flux-* / seedream-* / etc.)
-            config.freepikImageApi = saved.freepikImageApi or "mystic"
-            -- Freepik Mystic per-model options (only honored when freepikImageApi == "mystic")
-            config.freepikEngine = saved.freepikEngine or "automatic"
-            config.freepikResolution = saved.freepikResolution or "2k"
-            config.freepikStructureStrength = saved.freepikStructureStrength or 50
-            -- OpenAI gpt-image-2 per-model options
-            config.openaiQuality = saved.openaiQuality or "auto"
-            config.openaiSize = saved.openaiSize or "auto"
-            config.openaiOutputFormat = saved.openaiOutputFormat or "png"
-            config.openaiBackground = saved.openaiBackground or "auto"
-            -- Video generation
-            config.videoModel = saved.videoModel or "kling-v3-omni"
-            config.videoCfgScale = saved.videoCfgScale or 0.5
-            config.videoNegativePrompt = saved.videoNegativePrompt or ""
-            -- Provider selections (ensure defaults if missing)
-            config.imageProvider = saved.imageProvider or config.imageProvider
-            config.videoProvider = saved.videoProvider or config.videoProvider
-            config.voiceProvider = saved.voiceProvider or config.voiceProvider
-            config.lipsyncProvider = saved.lipsyncProvider or config.lipsyncProvider
             config.episodeNumber = saved.episodeNumber or ""
             config.episodeTitle = saved.episodeTitle or ""
         end
@@ -532,101 +473,6 @@ local function saveConfig()
         f:close()
     end
 end
-
--- ============================================================
--- GLOBAL CHARACTER LIBRARY (recurring character refs across projects)
--- ============================================================
-
--- In-memory mirror of character_library.json. Keyed by normalized name.
--- Schema per entry: {reference_image_path=..., last_updated=..., source_project=...}
-local characterLibrary = {}
-
--- Normalize a character name so "Aiden", "AIDEN ", and "aiden" all map
--- to the same library key.
-local function normCharName(name)
-    if type(name) ~= "string" then return "" end
-    local n = name:gsub("^%s+", ""):gsub("%s+$", "")
-    return n:upper()
-end
-
-local function loadCharacterLibrary()
-    characterLibrary = {}
-    local f = io.open(charLibraryPath, "r")
-    if not f then return end
-    local raw = f:read("*a")
-    f:close()
-    if not raw or raw == "" then return end
-
-    local ok, parsed = pcall(JSON.decode, raw)
-    if not ok or type(parsed) ~= "table" then
-        print("[ScriptToScreen] Character library parse failed; starting fresh")
-        return
-    end
-    local chars = parsed.characters
-    if type(chars) == "table" then
-        for name, entry in pairs(chars) do
-            if type(entry) == "table" and type(entry.reference_image_path) == "string" then
-                characterLibrary[normCharName(name)] = {
-                    display_name = entry.display_name or name,
-                    reference_image_path = entry.reference_image_path,
-                    last_updated = entry.last_updated or "",
-                    source_project = entry.source_project or "",
-                }
-            end
-        end
-    end
-end
-
-local function saveCharacterLibrary()
-    os.execute('mkdir -p "' .. configDir .. '"')
-    local out = {
-        version = 1,
-        characters = {},
-    }
-    for key, entry in pairs(characterLibrary) do
-        out.characters[key] = entry
-    end
-    local f = io.open(charLibraryPath, "w")
-    if f then
-        f:write(JSON.encode(out))
-        f:close()
-    end
-end
-
--- Upsert a character into the library. Called when the user picks or
--- changes a reference image in Step 3.
-local function updateCharacterLibrary(name, imagePath)
-    if not name or name == "" then return end
-    local key = normCharName(name)
-    local proj = (config.episodeTitle or "") .. (config.episodeNumber ~= "" and (" " .. config.episodeNumber) or "")
-    characterLibrary[key] = {
-        display_name = name,
-        reference_image_path = imagePath,
-        last_updated = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        source_project = proj,
-    }
-    saveCharacterLibrary()
-end
-
--- Look up a character's reference image. Returns (path, entry) or (nil, nil).
--- If the stored file no longer exists, returns nil so we don't populate
--- stale paths.
-local function lookupCharacterLibrary(name)
-    local key = normCharName(name)
-    local entry = characterLibrary[key]
-    if not entry then return nil, nil end
-    local p = entry.reference_image_path
-    if not p or p == "" then return nil, nil end
-    local f = io.open(p, "r")
-    if f then
-        f:close()
-        return p, entry
-    end
-    -- File missing — keep the entry but return nil so the UI shows (none)
-    return nil, entry
-end
-
-loadCharacterLibrary()
 
 -- ============================================================
 -- MAIN WIZARD WINDOW
@@ -681,12 +527,6 @@ local win = disp:AddWindow({
                 ui:HGroup{
                     ui:Label{Text = "Server URL:", Weight = 0.15},
                     ui:LineEdit{ID = "ImageServerUrl", Text = "http://127.0.0.1:8188", Weight = 0.65},
-                    ui:Label{Text = "", Weight = 0.2},
-                },
-                -- Freepik webhook key (optional — stored for future webhook integration)
-                ui:HGroup{
-                    ui:Label{Text = "Freepik Webhook Key:", Weight = 0.22, StyleSheet = "color: #888; font-size: 10px;"},
-                    ui:LineEdit{ID = "FreepikWebhookKey", PlaceholderText = "(optional, for future use)", EchoMode = "Password", Weight = 0.58},
                     ui:Label{Text = "", Weight = 0.2},
                 },
 
@@ -800,18 +640,8 @@ local win = disp:AddWindow({
                     ui:Button{ID = "ClearStyle", Text = "Clear", Weight = 0.12},
                 },
                 ui:Label{Text = "<b>Generation Settings</b>", StyleSheet = "padding-top: 10px;"},
-                -- Freepik image API (which endpoint/model to hit).
-                -- Hidden when image provider isn't Freepik.
                 ui:HGroup{
-                    ID = "FreepikApiRow",
-                    ui:Label{Text = "Freepik Model:", Weight = 0.2},
-                    ui:ComboBox{ID = "FreepikApiCombo", Weight = 0.8},
-                },
-                -- Mystic style sub-selector (renamed from generic "Model").
-                -- Only relevant when freepikApi == "mystic".
-                ui:HGroup{
-                    ID = "MysticStyleRow",
-                    ui:Label{Text = "Mystic Style:", Weight = 0.2},
+                    ui:Label{Text = "Model:", Weight = 0.2},
                     ui:ComboBox{ID = "ModelCombo", Weight = 0.8},
                 },
                 ui:HGroup{
@@ -823,47 +653,6 @@ local win = disp:AddWindow({
                     ui:Slider{ID = "DetailSlider", Minimum = 0, Maximum = 100, Value = 33, Weight = 0.6},
                     ui:Label{ID = "DetailValue", Text = "33", Weight = 0.2},
                 },
-
-                -- Freepik Mystic per-model options (shown only when API == mystic)
-                ui:HGroup{
-                    ID = "FreepikEngineRow",
-                    ui:Label{Text = "Engine (Mystic):", Weight = 0.2},
-                    ui:ComboBox{ID = "FreepikEngineCombo", Weight = 0.8},
-                },
-                ui:HGroup{
-                    ID = "FreepikResolutionRow",
-                    ui:Label{Text = "Resolution (Mystic):", Weight = 0.2},
-                    ui:ComboBox{ID = "FreepikResolutionCombo", Weight = 0.8},
-                },
-                ui:HGroup{
-                    ID = "FreepikStructureRow",
-                    ui:Label{Text = "Structure (Mystic):", Weight = 0.2},
-                    ui:Slider{ID = "FreepikStructureSlider", Minimum = 0, Maximum = 100, Value = 50, Weight = 0.6},
-                    ui:Label{ID = "FreepikStructureValue", Text = "50", Weight = 0.2},
-                },
-
-                -- OpenAI gpt-image-2 per-model options (shown only when imageProvider == "openai")
-                ui:HGroup{
-                    ID = "OpenAIQualityRow",
-                    ui:Label{Text = "Quality (OpenAI):", Weight = 0.2},
-                    ui:ComboBox{ID = "OpenAIQualityCombo", Weight = 0.8},
-                },
-                ui:HGroup{
-                    ID = "OpenAISizeRow",
-                    ui:Label{Text = "Size (OpenAI):", Weight = 0.2},
-                    ui:ComboBox{ID = "OpenAISizeCombo", Weight = 0.8},
-                },
-                ui:HGroup{
-                    ID = "OpenAIFormatRow",
-                    ui:Label{Text = "Format (OpenAI):", Weight = 0.2},
-                    ui:ComboBox{ID = "OpenAIFormatCombo", Weight = 0.8},
-                },
-                ui:HGroup{
-                    ID = "OpenAIBgRow",
-                    ui:Label{Text = "Background (OpenAI):", Weight = 0.2},
-                    ui:ComboBox{ID = "OpenAIBgCombo", Weight = 0.8},
-                },
-
                 ui:VGap(0, 1),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
@@ -874,38 +663,7 @@ local win = disp:AddWindow({
             },
 
             -- ========================
-            -- PAGE 5: Review Image Prompts
-            -- ========================
-            ui:VGroup{
-                ID = "ReviewImagesPage",
-                ui:Label{
-                    Text = "<h3>Review Image Prompts</h3><p>Inspect and edit the prompt for each shot before generation. Unedited shots will use the auto prompt.</p>",
-                    Alignment = {AlignHCenter = true},
-                },
-                ui:HGroup{
-                    ui:Label{ID = "ImageReviewStatus", Text = "0 of 0 approved", Weight = 0.5},
-                    ui:Button{ID = "ImageApproveAll", Text = "Approve All", Weight = 0.25},
-                    ui:Button{ID = "ImageRefreshAuto", Text = "Refresh Auto Prompts", Weight = 0.25},
-                },
-                ui:Tree{ID = "ImageReviewTree", HeaderHidden = false, MinimumSize = {500, 180}},
-                ui:Label{Text = "Prompt for selected shot (edit freely):"},
-                ui:TextEdit{ID = "ImageReviewEdit", MinimumSize = {400, 90}},
-                ui:HGroup{
-                    ui:Button{ID = "ImageSaveEdit", Text = "Save Edit", Weight = 0.33},
-                    ui:Button{ID = "ImageResetAuto", Text = "Reset to Auto", Weight = 0.33},
-                    ui:Button{ID = "ImageApproveOne", Text = "Approve This Shot", Weight = 0.34},
-                },
-                ui:VGap(0, 0.5),
-                ui:HGroup{
-                    ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn5", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn5", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn5", Text = "Next >", Weight = 0.15},
-                },
-            },
-
-            -- ========================
-            -- PAGE 6: Image Generation
+            -- PAGE 4: Image Generation
             -- ========================
             ui:VGroup{
                 ID = "ImageGenPage",
@@ -916,75 +674,30 @@ local win = disp:AddWindow({
                 ui:HGroup{
                     ui:Button{ID = "GenAllImages", Text = "Generate All Images", Weight = 0.3},
                     ui:Button{ID = "RegenImage", Text = "Regenerate Selected", Weight = 0.3},
-                    ui:Button{ID = "RetryFailedImages", Text = "Retry Failed", Weight = 0.3, Enabled = false},
-                    ui:Label{Text = "", Weight = 0.1},
+                    ui:Label{Text = "", Weight = 0.4},
                 },
                 ui:Label{ID = "ImageProgress", Text = "Ready"},
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn7", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn7", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn7", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn5", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn5", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn5", Text = "Next >", Weight = 0.15},
                 },
             },
 
             -- ========================
-            -- PAGE 7: Review Video Prompts
-            -- ========================
-            ui:VGroup{
-                ID = "ReviewVideosPage",
-                ui:Label{
-                    Text = "<h3>Review Video Motion Prompts</h3><p>Inspect and edit the motion prompt for each shot before generation. Unedited shots will use the auto prompt.</p>",
-                    Alignment = {AlignHCenter = true},
-                },
-                ui:HGroup{
-                    ui:Label{ID = "VideoReviewStatus", Text = "0 of 0 approved", Weight = 0.5},
-                    ui:Button{ID = "VideoApproveAll", Text = "Approve All", Weight = 0.25},
-                    ui:Button{ID = "VideoRefreshAuto", Text = "Refresh Auto Prompts", Weight = 0.25},
-                },
-                ui:Tree{ID = "VideoReviewTree", HeaderHidden = false, MinimumSize = {500, 180}},
-                ui:Label{Text = "Motion prompt for selected shot (edit freely):"},
-                ui:TextEdit{ID = "VideoReviewEdit", MinimumSize = {400, 90}},
-                ui:HGroup{
-                    ui:Button{ID = "VideoSaveEdit", Text = "Save Edit", Weight = 0.33},
-                    ui:Button{ID = "VideoResetAuto", Text = "Reset to Auto", Weight = 0.33},
-                    ui:Button{ID = "VideoApproveOne", Text = "Approve This Shot", Weight = 0.34},
-                },
-                ui:VGap(0, 0.5),
-                ui:HGroup{
-                    ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn6", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn6", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn6", Text = "Next >", Weight = 0.15},
-                },
-            },
-
-            -- ========================
-            -- PAGE 8: Video Generation
+            -- PAGE 5: Video Generation
             -- ========================
             ui:VGroup{
                 ID = "VideoGenPage",
                 ui:Label{Text = "<h3>Video Generation</h3><p>Generate videos from start-frame images.</p>", Alignment = {AlignHCenter = true}},
                 ui:Tree{ID = "VideoTree", HeaderHidden = false, MinimumSize = {500, 150}},
                 ui:HGroup{
-                    ui:Label{Text = "Video Model:", Weight = 0.15},
-                    ui:ComboBox{ID = "VideoModelCombo", Weight = 0.85},
-                },
-                ui:HGroup{
                     ui:Label{Text = "Duration (s):", Weight = 0.15},
                     ui:SpinBox{ID = "DurationSpin", Minimum = 3, Maximum = 15, Value = 5, Weight = 0.15},
-                    ui:Label{Text = "CFG:", Weight = 0.08},
-                    ui:Slider{ID = "VideoCfgSlider", Minimum = 0, Maximum = 100, Value = 50, Weight = 0.42},
-                    ui:Label{ID = "VideoCfgValue", Text = "0.50", Weight = 0.2},
-                },
-                ui:HGroup{
-                    ui:Label{Text = "Motion prompt:", Weight = 0.15},
-                    ui:LineEdit{ID = "MotionPrompt", PlaceholderText = "Auto-filled from action", Weight = 0.85},
-                },
-                ui:HGroup{
-                    ui:Label{Text = "Negative prompt:", Weight = 0.15},
-                    ui:LineEdit{ID = "VideoNegativePrompt", PlaceholderText = "(optional) blurry, low-quality, watermark...", Weight = 0.85},
+                    ui:Label{Text = "Motion prompt:", Weight = 0.1},
+                    ui:LineEdit{ID = "MotionPrompt", PlaceholderText = "Auto-filled from action", Weight = 0.6},
                 },
                 ui:HGroup{
                     ui:Button{ID = "GenAllVideos", Text = "Generate All Videos", Weight = 0.3},
@@ -995,9 +708,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn8", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn8", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn8", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn6", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn6", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn6", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -1028,9 +741,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn9", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn9", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn9", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn7", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn7", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn7", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -1050,9 +763,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn10", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn10", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn10", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn8", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn8", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn8", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -1072,9 +785,9 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn11", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn11", Text = "< Back", Weight = 0.15},
-                    ui:Button{ID = "NextBtn11", Text = "Next >", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn9", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn9", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "NextBtn9", Text = "Next >", Weight = 0.15},
                 },
             },
 
@@ -1105,8 +818,8 @@ local win = disp:AddWindow({
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
-                    ui:Button{ID = "CancelBtn12", Text = "Cancel", Weight = 0.15},
-                    ui:Button{ID = "BackBtn12", Text = "< Back", Weight = 0.15},
+                    ui:Button{ID = "CancelBtn10", Text = "Cancel", Weight = 0.15},
+                    ui:Button{ID = "BackBtn10", Text = "< Back", Weight = 0.15},
                     ui:Button{ID = "FinishBtn", Text = "Finish", Weight = 0.15},
                 },
             },
@@ -1124,11 +837,10 @@ local itm = win:GetItems()
 local imageProviders = {
     {id = "freepik",      name = "Freepik Mystic (Cloud)"},
     {id = "grok",         name = "Grok Imagine (Cloud)"},
-    {id = "openai",       name = "GPT Image 2 (OpenAI)"},
     {id = "comfyui_flux", name = "Flux Kontext (Local ComfyUI)"},
 }
 local videoProviders = {
-    {id = "freepik",      name = "Freepik (Cloud — Kling, Seedance, MiniMax, Wan)"},
+    {id = "freepik",      name = "Kling 3 Omni (Cloud via Freepik)"},
     {id = "grok",         name = "Grok Imagine Video (Cloud)"},
     {id = "comfyui_ltx",  name = "LTX 2.3 (Local ComfyUI)"},
 }
@@ -1167,7 +879,7 @@ end
 -- Helper: update field visibility based on provider type
 local function updateImageProviderFields()
     local id = getImageProviderId(itm.ImageProviderCombo.CurrentIndex)
-    local isCloud = (id == "freepik" or id == "grok" or id == "openai")
+    local isCloud = (id == "freepik" or id == "grok")
     itm.ImageApiKey.Enabled = isCloud
     itm.ImageServerUrl.Enabled = not isCloud
     if id == "freepik" then
@@ -1176,9 +888,6 @@ local function updateImageProviderFields()
     elseif id == "grok" then
         itm.ImageApiKey.PlaceholderText = "xAI API key..."
         itm.ImageApiKey.Text = config.providers.grok.apiKey or ""
-    elseif id == "openai" then
-        itm.ImageApiKey.PlaceholderText = "OpenAI API key (sk-...)..."
-        itm.ImageApiKey.Text = config.providers.openai and config.providers.openai.apiKey or ""
     else
         itm.ImageApiKey.PlaceholderText = "(not needed)"
         itm.ImageApiKey.Text = ""
@@ -1236,10 +945,6 @@ setComboToProvider(itm.LipSyncProviderCombo, lipsyncProviders, config.lipsyncPro
 itm.ImageServerUrl.Text = config.providers.comfyui.serverUrl
 itm.VideoServerUrl.Text = config.providers.comfyui.serverUrl
 itm.VoiceServerUrl.Text = config.providers.voicebox and config.providers.voicebox.serverUrl or "http://127.0.0.1:17493"
--- Freepik webhook key (optional, for future use)
-if itm.FreepikWebhookKey then
-    itm.FreepikWebhookKey.Text = (config.providers.freepik and config.providers.freepik.webhookKey) or ""
-end
 
 -- Initialize episode fields
 itm.EpisodeNumber.Text = config.episodeNumber or ""
@@ -1252,164 +957,15 @@ updateVoiceProviderFields()
 updateLipSyncProviderFields()
 
 -- Style page combos
--- Freepik image API selector. Each entry is {id, displayName}. The id is
--- what's sent to the backend; the display name is human-friendly.
-local freepikImageApis = {
-    {id = "mystic",           name = "Mystic (default — multiple styles)"},
-    {id = "flux-2-pro",       name = "Flux 2 Pro"},
-    {id = "flux-2-turbo",     name = "Flux 2 Turbo (faster)"},
-    {id = "flux-2-klein",     name = "Flux 2 Klein"},
-    {id = "flux-pro-v1-1",    name = "Flux Pro v1.1"},
-    {id = "flux-dev",         name = "Flux Dev"},
-    {id = "flux-kontext-pro", name = "Flux Kontext Pro"},
-    {id = "hyperflux",        name = "Hyperflux"},
-    {id = "seedream-4",       name = "Seedream 4"},
-    {id = "seedream-v4-5",    name = "Seedream 4.5 (latest)"},
-    {id = "z-image-turbo",    name = "Z-Image Turbo"},
-    {id = "runway",           name = "RunWay Text-to-Image"},
-}
-for _, api in ipairs(freepikImageApis) do
-    itm.FreepikApiCombo:AddItem(api.name)
-end
-
--- Mystic style sub-selector (only shown when freepikApi == "mystic")
-local mysticStyles = {"realism", "fluid", "zen", "flexible", "super_real", "editorial_portraits"}
-for _, s in ipairs(mysticStyles) do itm.ModelCombo:AddItem(s) end
+itm.ModelCombo:AddItem("realism")
+itm.ModelCombo:AddItem("fluid")
+itm.ModelCombo:AddItem("zen")
+itm.ModelCombo:AddItem("flexible")
+itm.ModelCombo:AddItem("super_real")
 
 itm.AspectCombo:AddItem("widescreen_16_9")
 itm.AspectCombo:AddItem("classic_4_3")
 itm.AspectCombo:AddItem("square_1_1")
-
--- Helper: set a combo box to a value by matching against a known list.
--- Fusion UI's `Count` is a method (not a field), so we iterate the values
--- list the caller already built when populating the combo.
-local function setComboToValue(combo, values, value)
-    if type(values) ~= "table" then return end
-    for i, v in ipairs(values) do
-        if v == value then
-            combo.CurrentIndex = i - 1
-            return
-        end
-    end
-    combo.CurrentIndex = 0
-end
-
--- Freepik Mystic per-model combos
-local freepikEngines = {"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}
-for _, v in ipairs(freepikEngines) do itm.FreepikEngineCombo:AddItem(v) end
-local freepikResolutions = {"1k", "2k", "4k"}
-for _, v in ipairs(freepikResolutions) do itm.FreepikResolutionCombo:AddItem(v) end
-
--- OpenAI gpt-image-2 per-model combos
-local openaiQualities = {"auto", "low", "medium", "high"}
-for _, v in ipairs(openaiQualities) do itm.OpenAIQualityCombo:AddItem(v) end
-local openaiSizes = {"auto", "1024x1024", "1536x1024", "1024x1536"}
-for _, v in ipairs(openaiSizes) do itm.OpenAISizeCombo:AddItem(v) end
-local openaiFormats = {"png", "jpeg", "webp"}
-for _, v in ipairs(openaiFormats) do itm.OpenAIFormatCombo:AddItem(v) end
-local openaiBackgrounds = {"auto", "opaque", "transparent"}
-for _, v in ipairs(openaiBackgrounds) do itm.OpenAIBgCombo:AddItem(v) end
-
--- Initialize per-model option values from config
-setComboToValue(itm.FreepikEngineCombo, freepikEngines, config.freepikEngine)
-setComboToValue(itm.FreepikResolutionCombo, freepikResolutions, config.freepikResolution)
-itm.FreepikStructureSlider.Value = config.freepikStructureStrength or 50
-itm.FreepikStructureValue.Text = tostring(itm.FreepikStructureSlider.Value)
-
--- Helper: find display name for a freepik API id (and vice versa).
-local function freepikApiIdToName(id)
-    for _, a in ipairs(freepikImageApis) do
-        if a.id == id then return a.name end
-    end
-    return freepikImageApis[1].name
-end
-local function freepikApiNameToId(name)
-    for _, a in ipairs(freepikImageApis) do
-        if a.name == name then return a.id end
-    end
-    return "mystic"
-end
-
--- Restore Freepik API selection from config
-do
-    local savedApi = config.freepikImageApi or "mystic"
-    local names = {}
-    for _, a in ipairs(freepikImageApis) do table.insert(names, a.name) end
-    setComboToValue(itm.FreepikApiCombo, names, freepikApiIdToName(savedApi))
-end
-setComboToValue(itm.OpenAIQualityCombo, openaiQualities, config.openaiQuality)
-setComboToValue(itm.OpenAISizeCombo, openaiSizes, config.openaiSize)
-setComboToValue(itm.OpenAIFormatCombo, openaiFormats, config.openaiOutputFormat)
-setComboToValue(itm.OpenAIBgCombo, openaiBackgrounds, config.openaiBackground)
-
--- Video model selector (Step 8)
-local videoModels = {
-    "kling-v3-omni",
-    "kling-v2-5-pro",
-    "kling-v2-6-pro",
-    "kling-o1-pro",
-    "seedance-pro-1080p",
-    "minimax-hailuo-2-3",
-    "wan-v2-6-1080p",
-}
-for _, vm in ipairs(videoModels) do
-    itm.VideoModelCombo:AddItem(vm)
-end
-setComboToValue(itm.VideoModelCombo, videoModels, config.videoModel or "kling-v3-omni")
-
--- Video CFG slider (0-100 UI → 0.0-1.0 API). Store as float in config.
-itm.VideoCfgSlider.Value = math.floor((config.videoCfgScale or 0.5) * 100 + 0.5)
-itm.VideoCfgValue.Text = string.format("%.2f", (itm.VideoCfgSlider.Value or 50) / 100.0)
-
--- Video negative prompt
-itm.VideoNegativePrompt.Text = config.videoNegativePrompt or ""
-
--- Show/hide provider-specific option rows based on image provider AND
--- the selected Freepik image API. The Mystic-specific rows (style, engine,
--- resolution, structure) only matter when freepikImageApi == "mystic" —
--- the other Freepik APIs (Flux, Seedream, Hyperflux, etc.) ignore them.
--- Fusion has no Visible property on HGroup in every Resolve version — we
--- toggle Hidden + Enabled.
-local function refreshProviderControls()
-    local pid = config.imageProvider or "freepik"
-    local isFreepik = (pid == "freepik")
-    local isOpenAI  = (pid == "openai")
-
-    -- Which Freepik API is currently selected (only meaningful when isFreepik).
-    local apiId = "mystic"
-    if isFreepik and itm.FreepikApiCombo then
-        apiId = freepikApiNameToId(itm.FreepikApiCombo.CurrentText or "") or "mystic"
-    end
-    local isMystic = isFreepik and apiId == "mystic"
-
-    local function setRow(row, on)
-        if not row then return end
-        pcall(function() row.Hidden = not on end)
-        pcall(function() row.Enabled = on end)
-    end
-    -- Freepik API picker visible only for Freepik image provider
-    setRow(itm.FreepikApiRow,        isFreepik)
-    -- Mystic-only options visible only when API == mystic
-    setRow(itm.MysticStyleRow,       isMystic)
-    setRow(itm.FreepikEngineRow,     isMystic)
-    setRow(itm.FreepikResolutionRow, isMystic)
-    setRow(itm.FreepikStructureRow,  isMystic)
-    -- OpenAI options
-    setRow(itm.OpenAIQualityRow,     isOpenAI)
-    setRow(itm.OpenAISizeRow,        isOpenAI)
-    setRow(itm.OpenAIFormatRow,      isOpenAI)
-    setRow(itm.OpenAIBgRow,          isOpenAI)
-end
-
--- Re-run visibility logic when the user picks a different Freepik API.
-function win.On.FreepikApiCombo.CurrentIndexChanged(ev)
-    local name = itm.FreepikApiCombo.CurrentText or ""
-    config.freepikImageApi = freepikApiNameToId(name)
-    saveConfig()
-    refreshProviderControls()
-end
-
-refreshProviderControls()
 
 itm.ResCombo:AddItem("1920x1080")
 itm.ResCombo:AddItem("3840x2160")
@@ -1423,24 +979,12 @@ itm.FPSCombo:AddItem("30")
 -- NAVIGATION
 -- ============================================================
 
--- Forward-declare populateReviewTree so showStep can call it before the
--- real definition appears below (Lua locals aren't visible to code that
--- parsed earlier in the same chunk).
-local populateReviewTree
-
 local function showStep(step)
     currentStep = step
     itm.PageStack.CurrentIndex = step - 1
     itm.StepLabel.Text = string.format("<b>%d/%d: %s</b>", step, #STEPS, STEPS[step])
-    -- When entering Review Images (step 5) or Review Videos (step 7),
-    -- ensure the review tree is populated from the current screenplay.
-    if step == 5 and screenplayData then
-        pcall(populateReviewTree, "image")
-    elseif step == 7 and screenplayData then
-        pcall(populateReviewTree, "video")
-    end
-    -- When entering Assembly (step 12), set timeline name from episode info
-    if step == 12 then
+    -- When entering Assembly (step 10), set timeline name from episode info
+    if step == 10 then
         local epNum = config.episodeNumber or ""
         local epTitle = config.episodeTitle or ""
         if epNum ~= "" or epTitle ~= "" then
@@ -1470,18 +1014,12 @@ local function onNext()
             config.providers.freepik.apiKey = itm.ImageApiKey.Text
         elseif imgId == "grok" then
             config.providers.grok.apiKey = itm.ImageApiKey.Text
-        elseif imgId == "openai" then
-            config.providers.openai.apiKey = itm.ImageApiKey.Text
         end
         local vidId = config.videoProvider
         if vidId == "freepik" then
             config.providers.freepik.apiKey = itm.VideoApiKey.Text
         elseif vidId == "grok" then
             config.providers.grok.apiKey = itm.VideoApiKey.Text
-        end
-        -- Freepik webhook key (always saved when present, independent of provider)
-        if itm.FreepikWebhookKey and itm.FreepikWebhookKey.Text then
-            config.providers.freepik.webhookKey = itm.FreepikWebhookKey.Text
         end
         local voiceId = config.voiceProvider
         if voiceId == "elevenlabs" then
@@ -1505,34 +1043,6 @@ local function onNext()
         config.episodeTitle = itm.EpisodeTitle.Text or ""
         saveConfig()
     end
-
-    -- Save Step 4 (Style + generation settings) on Next
-    if currentStep == 4 then
-        config.model = itm.ModelCombo.CurrentText or "realism"
-        config.aspectRatio = itm.AspectCombo.CurrentText or "widescreen_16_9"
-        config.detailing = itm.DetailSlider.Value or 33
-        -- Freepik image API selection (mystic / flux-* / seedream-* / etc.)
-        config.freepikImageApi = freepikApiNameToId(itm.FreepikApiCombo.CurrentText or "")
-        -- Freepik Mystic per-model options
-        config.freepikEngine = itm.FreepikEngineCombo.CurrentText or "automatic"
-        config.freepikResolution = itm.FreepikResolutionCombo.CurrentText or "2k"
-        config.freepikStructureStrength = itm.FreepikStructureSlider.Value or 50
-        -- OpenAI gpt-image-2 per-model options
-        config.openaiQuality = itm.OpenAIQualityCombo.CurrentText or "auto"
-        config.openaiSize = itm.OpenAISizeCombo.CurrentText or "auto"
-        config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or "png"
-        config.openaiBackground = itm.OpenAIBgCombo.CurrentText or "auto"
-        saveConfig()
-    end
-
-    -- Save Step 8 (Video generation settings) on Next — was Step 6 before review pages
-    if currentStep == 8 then
-        config.videoModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
-        config.videoCfgScale = (itm.VideoCfgSlider.Value or 50) / 100.0
-        config.videoNegativePrompt = itm.VideoNegativePrompt.Text or ""
-        saveConfig()
-    end
-
     if currentStep < #STEPS then
         showStep(currentStep + 1)
     end
@@ -1563,8 +1073,6 @@ function win.On.CancelBtn7.Clicked(ev) onClose() end
 function win.On.CancelBtn8.Clicked(ev) onClose() end
 function win.On.CancelBtn9.Clicked(ev) onClose() end
 function win.On.CancelBtn10.Clicked(ev) onClose() end
-function win.On.CancelBtn11.Clicked(ev) onClose() end
-function win.On.CancelBtn12.Clicked(ev) onClose() end
 
 -- Back buttons
 function win.On.BackBtn2.Clicked(ev) onBack() end
@@ -1576,8 +1084,6 @@ function win.On.BackBtn7.Clicked(ev) onBack() end
 function win.On.BackBtn8.Clicked(ev) onBack() end
 function win.On.BackBtn9.Clicked(ev) onBack() end
 function win.On.BackBtn10.Clicked(ev) onBack() end
-function win.On.BackBtn11.Clicked(ev) onBack() end
-function win.On.BackBtn12.Clicked(ev) onBack() end
 
 -- Next buttons
 function win.On.NextBtn.Clicked(ev) onNext() end
@@ -1589,8 +1095,6 @@ function win.On.NextBtn6.Clicked(ev) onNext() end
 function win.On.NextBtn7.Clicked(ev) onNext() end
 function win.On.NextBtn8.Clicked(ev) onNext() end
 function win.On.NextBtn9.Clicked(ev) onNext() end
-function win.On.NextBtn10.Clicked(ev) onNext() end
-function win.On.NextBtn11.Clicked(ev) onNext() end
 
 -- Finish & Close
 function win.On.FinishBtn.Clicked(ev) onClose() end
@@ -1602,17 +1106,6 @@ function win.On.STS_Main.Close(ev) onClose() end
 
 function win.On.ImageProviderCombo.CurrentIndexChanged(ev)
     updateImageProviderFields()
-    -- Record the new choice so refreshProviderControls() can react before Next is pressed
-    config.imageProvider = getImageProviderId(itm.ImageProviderCombo.CurrentIndex)
-    pcall(refreshProviderControls)
-end
-
-function win.On.FreepikStructureSlider.ValueChanged(ev)
-    itm.FreepikStructureValue.Text = tostring(itm.FreepikStructureSlider.Value)
-end
-
-function win.On.VideoCfgSlider.ValueChanged(ev)
-    itm.VideoCfgValue.Text = string.format("%.2f", (itm.VideoCfgSlider.Value or 50) / 100.0)
 end
 
 function win.On.VideoProviderCombo.CurrentIndexChanged(ev)
@@ -1697,7 +1190,7 @@ function win.On.TestImageProvider.Clicked(ev)
     local key = (itm.ImageApiKey.Text or ""):match("^%s*(.-)%s*$")
     local url = itm.ImageServerUrl.Text or ""
     -- For cloud providers, require API key
-    if (pid == "freepik" or pid == "grok" or pid == "openai") and key == "" then
+    if (pid == "freepik" or pid == "grok") and key == "" then
         itm.ImageProviderStatus.Text = "No key"
         itm.ImageProviderStatus.StyleSheet = "color: orange;"
         return
@@ -1707,8 +1200,6 @@ function win.On.TestImageProvider.Clicked(ev)
             config.providers.freepik.apiKey = key
         elseif pid == "grok" then
             config.providers.grok.apiKey = key
-        elseif pid == "openai" then
-            config.providers.openai.apiKey = key
         end
         config.providers.comfyui.serverUrl = url
         config.imageProvider = pid
@@ -1935,40 +1426,12 @@ function populateCharacterTree(data)
     itm.CharTree.ColumnWidth[2] = 300
 
     itm.CharTree:Clear()
-    local libraryHits = 0
     for name, info in pairs(data.characters) do
         local item = itm.CharTree:NewItem()
         item.Text[0] = name
         item.Text[1] = tostring(info.lines)
-
-        -- If the user hasn't set a ref image for this character yet in
-        -- this project, try the global library for recurring characters.
-        if not characterImages[name] or characterImages[name] == "" then
-            local libPath, libEntry = lookupCharacterLibrary(name)
-            if libPath then
-                characterImages[name] = libPath
-                libraryHits = libraryHits + 1
-            end
-        end
-
-        local currentPath = characterImages[name]
-        if currentPath and currentPath ~= "" then
-            -- Check if this came from the library and tag it visually
-            local libPath = lookupCharacterLibrary(name)
-            if libPath == currentPath then
-                item.Text[2] = currentPath .. "  (from library)"
-            else
-                item.Text[2] = currentPath
-            end
-        else
-            item.Text[2] = "(none)"
-        end
-
+        item.Text[2] = characterImages[name] or "(none)"
         itm.CharTree:AddTopLevelItem(item)
-    end
-
-    if libraryHits > 0 then
-        print(string.format("[ScriptToScreen] Auto-loaded %d character reference(s) from library", libraryHits))
     end
 end
 
@@ -1980,16 +1443,9 @@ function win.On.BrowseCharImg.Clicked(ev)
     if path and path ~= "" then
         characterImages[charName] = path
         selected.Text[2] = path
-        -- Persist to the global library so future projects with the same
-        -- character name auto-populate this ref image.
-        updateCharacterLibrary(charName, path)
-        print(string.format("[ScriptToScreen] Saved '%s' to character library", charName))
     end
 end
 
--- Clear removes the ref image from THIS project only.
--- The library entry is kept so other projects can still use it.
--- (Users who want to remove from the library can overwrite with a new image.)
 function win.On.ClearCharImg.Clicked(ev)
     local selected = itm.CharTree:CurrentItem()
     if not selected then return end
@@ -2034,11 +1490,6 @@ function win.On.GenAllImages.Clicked(ev)
         itm.ImageProgress.StyleSheet = "color: red;"
         return
     end
-    if imgPid == "openai" and (config.providers.openai and config.providers.openai.apiKey or "") == "" then
-        itm.ImageProgress.Text = "Set OpenAI API key first (Step 1)!"
-        itm.ImageProgress.StyleSheet = "color: red;"
-        return
-    end
     if not screenplayData then
         itm.ImageProgress.Text = "Parse a screenplay first (Step 2)!"
         itm.ImageProgress.StyleSheet = "color: red;"
@@ -2061,23 +1512,7 @@ function win.On.GenAllImages.Clicked(ev)
         imgApiKey = config.providers.freepik.apiKey or ""
     elseif imgPid == "grok" then
         imgApiKey = config.providers.grok.apiKey or ""
-    elseif imgPid == "openai" then
-        imgApiKey = config.providers.openai and config.providers.openai.apiKey or ""
     end
-
-    -- Persist the latest Step 4 picks into config before Python reads them
-    config.model = model
-    config.aspectRatio = aspect
-    config.detailing = detail
-    config.freepikImageApi = freepikApiNameToId(itm.FreepikApiCombo.CurrentText or "")
-    config.freepikEngine = itm.FreepikEngineCombo.CurrentText or config.freepikEngine
-    config.freepikResolution = itm.FreepikResolutionCombo.CurrentText or config.freepikResolution
-    config.freepikStructureStrength = itm.FreepikStructureSlider.Value or config.freepikStructureStrength
-    config.openaiQuality = itm.OpenAIQualityCombo.CurrentText or config.openaiQuality
-    config.openaiSize = itm.OpenAISizeCombo.CurrentText or config.openaiSize
-    config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or config.openaiOutputFormat
-    config.openaiBackground = itm.OpenAIBgCombo.CurrentText or config.openaiBackground
-    saveConfig()
 
     -- Write API key to temp file
     local keyfile = os.tmpname()
@@ -2133,23 +1568,13 @@ function win.On.GenAllImages.Clicked(ev)
         .. '    defaults = GenerationDefaults(\n'
         .. '        freepik_model="' .. model .. '",\n'
         .. '        aspect_ratio="' .. aspect .. '",\n'
-        .. '        creative_detailing=' .. tostring(detail) .. ',\n'
-        .. '        freepik_image_api="' .. (config.freepikImageApi or "mystic") .. '",\n'
-        .. '        freepik_engine="' .. (config.freepikEngine or "automatic") .. '",\n'
-        .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
-        .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
-        .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
-        .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
-        .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
-        .. '        openai_background="' .. (config.openaiBackground or "auto") .. '",\n'
+        .. '        creative_detailing=' .. tostring(detail) .. '\n'
         .. '    )\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
-        .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
         .. '    results = generate_images_for_screenplay(\n'
         .. '        screenplay, provider, "' .. safeOutput .. '",\n'
         .. '        style_reference_path=style_path,\n'
         .. '        defaults=defaults,\n'
-        .. '        custom_prompts=custom_prompts or None,\n'
         .. '        project_slug=project_slug,\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'
@@ -2169,22 +1594,6 @@ function win.On.GenAllImages.Clicked(ev)
             local count = data.count or 0
             local totalShots = data.total_shots or 0
             local errs = data.errors or {}
-
-            -- Parse error strings ("s{N}_sh{M}: <msg>") into failedImages map
-            -- so we can show them in the tree and retry them in one click.
-            failedImages = {}
-            for _, errStr in ipairs(errs) do
-                local sk, msg = tostring(errStr):match("^(s%d+_sh%d+):%s*(.*)$")
-                if sk then
-                    failedImages[sk] = (msg and msg ~= "") and msg or "Unknown error"
-                end
-            end
-            -- Any previously-failed shot that now has a successful path is cleared
-            for sk, _ in pairs(generatedImages) do
-                failedImages[sk] = nil
-            end
-            -- Refresh the tree so users can see Failed/Done badges + retry count
-            pcall(populateImageTree)
             if count > 0 then
                 -- Import generated images to Resolve media pool (episode/scene bins)
                 local importMsg = ""
@@ -2264,274 +1673,6 @@ function win.On.GenAllImages.Clicked(ev)
         itm.ImageProgress.Text = "Failed — raw output: " .. tostring(result or ""):sub(1, 100)
         itm.ImageProgress.StyleSheet = "color: red;"
     end
-end
-
--- Retry Failed: loops through every failed shot and regenerates it, one at a time.
--- Successes populate generatedImages and are removed from failedImages.
--- The tree refreshes after each attempt so progress is visible.
-function win.On.RetryFailedImages.Clicked(ev)
-    -- Collect failed shot keys (s0_sh0 format) up front so we don't
-    -- mutate the table while iterating.
-    local failedList = {}
-    for sk, _ in pairs(failedImages) do
-        table.insert(failedList, sk)
-    end
-    table.sort(failedList)
-
-    if #failedList == 0 then
-        itm.ImageProgress.Text = "No failed images to retry."
-        itm.ImageProgress.StyleSheet = "color: #888;"
-        return
-    end
-
-    -- Validate provider + API key (same checks as Generate All Images)
-    local imgPid = config.imageProvider
-    if imgPid == "freepik" and (config.providers.freepik.apiKey or "") == "" then
-        itm.ImageProgress.Text = "Set Freepik API key first (Step 1)!"
-        itm.ImageProgress.StyleSheet = "color: red;"
-        return
-    end
-    if imgPid == "grok" and (config.providers.grok.apiKey or "") == "" then
-        itm.ImageProgress.Text = "Set xAI API key first (Step 1)!"
-        itm.ImageProgress.StyleSheet = "color: red;"
-        return
-    end
-    if not screenplayData then
-        itm.ImageProgress.Text = "Parse a screenplay first (Step 2)!"
-        itm.ImageProgress.StyleSheet = "color: red;"
-        return
-    end
-
-    -- Disable the button while running so users don't double-click
-    itm.RetryFailedImages.Enabled = false
-
-    local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
-    local safeStyle = itm.StylePath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
-    local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
-    local model = itm.ModelCombo.CurrentText or "realism"
-    local aspect = itm.AspectCombo.CurrentText or "widescreen_16_9"
-    local detail = itm.DetailSlider.Value or 33
-
-    local imgApiKey = ""
-    if imgPid == "freepik" then
-        imgApiKey = config.providers.freepik.apiKey or ""
-    elseif imgPid == "grok" then
-        imgApiKey = config.providers.grok.apiKey or ""
-    elseif imgPid == "openai" then
-        imgApiKey = config.providers.openai and config.providers.openai.apiKey or ""
-    end
-    local keyfile = os.tmpname()
-    local kf = io.open(keyfile, "w")
-    if kf then kf:write(imgApiKey); kf:close() end
-
-    local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
-
-    -- Build character image refs JSON (same as main gen)
-    local charImgParts = {}
-    for name, imgPath in pairs(characterImages) do
-        local safeName = name:gsub('"', '\\"')
-        local safeImg = imgPath:gsub("\\", "\\\\"):gsub('"', '\\"')
-        table.insert(charImgParts, '"' .. safeName .. '":"' .. safeImg .. '"')
-    end
-    local charImgJson = "{" .. table.concat(charImgParts, ",") .. "}"
-
-    -- Serialize the list of failed shot_keys as JSON
-    local failedKeysParts = {}
-    for _, sk in ipairs(failedList) do
-        table.insert(failedKeysParts, '"' .. sk .. '"')
-    end
-    local failedKeysJson = "[" .. table.concat(failedKeysParts, ",") .. "]"
-
-    local total = #failedList
-    itm.ImageProgress.Text = "Retrying " .. tostring(total) .. " failed images..."
-    itm.ImageProgress.StyleSheet = "color: #888;"
-
-    -- Derive project slug (same pattern as GenAllImages)
-    local projectSlugCode = 'import re\n'
-        .. 'try:\n'
-        .. '    import DaVinciResolveScript as dvr\n'
-        .. '    _resolve = dvr.scriptapp("Resolve")\n'
-        .. '    _pname = _resolve.GetProjectManager().GetCurrentProject().GetName()\n'
-        .. '    project_slug = re.sub(r"[^\\w\\-]", "_", _pname).strip("_").lower() or "default"\n'
-        .. 'except: project_slug = "default"\n'
-
-    -- Python batch: walks the screenplay, filters to failed_keys, reuses
-    -- build_image_prompt + regenerate_single_image, returns per-shot results.
-    local code = 'import json, traceback, os, uuid\n'
-        .. projectSlugCode
-        .. 'try:\n'
-        .. '    from script_to_screen.parsing.pdf_parser import parse_pdf\n'
-        .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
-        .. '    from script_to_screen.api.registry import create_image_provider\n'
-        .. '    from script_to_screen.pipeline.image_gen import build_image_prompt, regenerate_single_image\n'
-        .. '    from script_to_screen.config import GenerationDefaults\n'
-        .. '    from script_to_screen.manifest import update_character, record_generated_image\n'
-        .. '    script_path = "' .. safePath .. '"\n'
-        .. '    if script_path.lower().endswith(".pdf"):\n'
-        .. '        screenplay = parse_pdf(script_path)\n'
-        .. '    else:\n'
-        .. '        screenplay = parse_fountain(script_path)\n'
-        .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
-        .. '    for name, path in char_images.items():\n'
-        .. '        if name in screenplay.characters:\n'
-        .. '            screenplay.characters[name].reference_image_path = path\n'
-        .. '            update_character(project_slug, name, reference_image_path=path)\n'
-        .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
-        .. '    provider = create_image_provider("' .. imgPid .. '",\n'
-        .. '        api_key=api_key,\n'
-        .. '        server_url="' .. safeServerUrl .. '",\n'
-        .. '        model="' .. model .. '")\n'
-        .. '    defaults = GenerationDefaults(\n'
-        .. '        freepik_model="' .. model .. '",\n'
-        .. '        aspect_ratio="' .. aspect .. '",\n'
-        .. '        creative_detailing=' .. tostring(detail) .. ',\n'
-        .. '        freepik_image_api="' .. (config.freepikImageApi or "mystic") .. '",\n'
-        .. '        freepik_engine="' .. (config.freepikEngine or "automatic") .. '",\n'
-        .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
-        .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
-        .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
-        .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
-        .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
-        .. '        openai_background="' .. (config.openaiBackground or "auto") .. '")\n'
-        .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
-        .. '    failed_keys = set(json.loads(\'' .. failedKeysJson:gsub("'", "\\'") .. '\'))\n'
-        .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
-        .. '    paths = {}\n'
-        .. '    errors = []\n'
-        .. '    for scene in screenplay.scenes:\n'
-        .. '        for si, shot in enumerate(scene.shots):\n'
-        .. '            sk = f"s{scene.index}_sh{si}"\n'
-        .. '            if sk not in failed_keys: continue\n'
-        .. '            try:\n'
-        .. '                # Use user-edited prompt if one exists for this shot\n'
-        .. '                if sk in custom_prompts and custom_prompts[sk]:\n'
-        .. '                    prompt = custom_prompts[sk]\n'
-        .. '                else:\n'
-        .. '                    prompt = build_image_prompt(shot, scene, screenplay, shot_idx=si)\n'
-        .. '                char_refs = {}\n'
-        .. '                for c in shot.characters_present:\n'
-        .. '                    ch = screenplay.characters.get(c)\n'
-        .. '                    if ch and ch.reference_image_path:\n'
-        .. '                        char_refs[c] = ch.reference_image_path\n'
-        .. '                prompt = provider.build_prompt(prompt, char_refs)\n'
-        .. '                actual = regenerate_single_image(sk, prompt, provider, "' .. safeOutput .. '",\n'
-        .. '                    style_reference_path=style_path, defaults=defaults)\n'
-        .. '                if actual:\n'
-        .. '                    paths[sk] = actual\n'
-        .. '                    try:\n'
-        .. '                        record_generated_image(\n'
-        .. '                            project_slug=project_slug,\n'
-        .. '                            filename=os.path.basename(actual),\n'
-        .. '                            file_path=actual,\n'
-        .. '                            shot_key=sk,\n'
-        .. '                            prompt=prompt,\n'
-        .. '                            provider=type(provider).__name__,\n'
-        .. '                            provider_settings={"model": "' .. model .. '", "aspect_ratio": "' .. aspect .. '"},\n'
-        .. '                            style_reference_path=style_path or "",\n'
-        .. '                            character_refs=char_refs)\n'
-        .. '                    except Exception: pass\n'
-        .. '                else:\n'
-        .. '                    errors.append(f"{sk}: retry returned no image")\n'
-        .. '            except Exception as e:\n'
-        .. '                errors.append(f"{sk}: {e}")\n'
-        .. '    print(json.dumps({"status": "ok", "paths": paths, "errors": errors,\n'
-        .. '        "attempted": len(failed_keys), "recovered": len(paths)}))\n'
-        .. 'except Exception as e:\n'
-        .. '    print(json.dumps({"status": "error", "error": str(e), "trace": traceback.format_exc()}))\n'
-
-    local result = runPython(code)
-    os.remove(keyfile)
-
-    local jsonStr = result and result:match("(%{.+%})")
-    if not jsonStr then
-        itm.ImageProgress.Text = "Retry failed — raw output: " .. tostring(result or ""):sub(1, 100)
-        itm.ImageProgress.StyleSheet = "color: red;"
-        itm.RetryFailedImages.Enabled = true
-        return
-    end
-
-    local data = JSON.decode(jsonStr)
-    if not data or data.status ~= "ok" then
-        itm.ImageProgress.Text = "Retry error: " .. ((data and data.error) or "Unknown")
-        itm.ImageProgress.StyleSheet = "color: red;"
-        if data and data.trace then print("[ScriptToScreen] " .. data.trace) end
-        itm.RetryFailedImages.Enabled = true
-        return
-    end
-
-    -- Merge recovered paths into generatedImages and remove from failedImages
-    local recovered = 0
-    for sk, path in pairs(data.paths or {}) do
-        generatedImages[sk] = path
-        failedImages[sk] = nil
-        recovered = recovered + 1
-    end
-    -- Record remaining errors with their new messages
-    for _, errStr in ipairs(data.errors or {}) do
-        local sk, msg = tostring(errStr):match("^(s%d+_sh%d+):%s*(.*)$")
-        if sk and not generatedImages[sk] then
-            failedImages[sk] = (msg and msg ~= "") and msg or "Unknown error"
-        end
-    end
-
-    -- Import recovered images into the media pool (reuses the same bin logic)
-    local importMsg = ""
-    local importOk, importErr = pcall(function()
-        local project = resolve:GetProjectManager():GetCurrentProject()
-        if project and recovered > 0 then
-            local mp = project:GetMediaPool()
-            local rootF = mp:GetRootFolder()
-            local stsBin2 = nil
-            for _, folder in pairs(rootF:GetSubFolders() or {}) do
-                if folder:GetName() == "ScriptToScreen" then stsBin2 = folder; break end
-            end
-            if not stsBin2 then stsBin2 = mp:AddSubFolder(rootF, "ScriptToScreen") end
-            local function findOrCreate(parent, name)
-                if not parent then return nil end
-                for _, f in pairs(parent:GetSubFolders() or {}) do
-                    if f:GetName() == name then return f end
-                end
-                return mp:AddSubFolder(parent, name)
-            end
-            local epPfx = buildEpisodePrefix()
-            local importCount = 0
-            for shotKey, imgPath in pairs(data.paths or {}) do
-                if type(imgPath) == "string" then
-                    local targetBin = stsBin2
-                    if epPfx ~= "" then targetBin = findOrCreate(targetBin, epPfx) end
-                    local sNum = tonumber((shotKey or ""):match("^s(%d+)")) or 0
-                    targetBin = findOrCreate(targetBin, "S" .. tostring(sNum))
-                    targetBin = findOrCreate(targetBin, "Images")
-                    if targetBin then mp:SetCurrentFolder(targetBin) end
-                    local items = mp:ImportMedia({imgPath}) or {}
-                    for _, item in ipairs(items) do
-                        local basename = imgPath:match("([^/]+)$") or ""
-                        pcall(function() item:SetMetadata("Comments", "STS:" .. basename) end)
-                    end
-                    importCount = importCount + #items
-                end
-            end
-            importMsg = " (" .. tostring(importCount) .. " added to bin)"
-        end
-    end)
-    if not importOk then
-        print("[ScriptToScreen] Retry bin import warning: " .. tostring(importErr))
-    end
-
-    -- Refresh tree to reflect new Done/Failed states
-    pcall(populateImageTree)
-
-    -- Summarize
-    local stillFailed = 0
-    for _ in pairs(failedImages) do stillFailed = stillFailed + 1 end
-    local msg = "Retry: recovered " .. tostring(recovered) .. " of " .. tostring(total) .. "!" .. importMsg
-    if stillFailed > 0 then
-        msg = msg .. " (" .. tostring(stillFailed) .. " still failing)"
-        itm.ImageProgress.StyleSheet = "color: orange; font-weight: bold;"
-    else
-        itm.ImageProgress.StyleSheet = "color: green; font-weight: bold;"
-    end
-    itm.ImageProgress.Text = msg
 end
 
 -- ImageTree selection → show the EXACT prompt that Python's build_image_prompt produces
@@ -2628,12 +1769,6 @@ function win.On.GenAllVideos.Clicked(ev)
     local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
     local duration = itm.DurationSpin.Value or 5
 
-    -- Persist Step 6 picks into config before Python reads them
-    config.videoModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
-    config.videoCfgScale = (itm.VideoCfgSlider.Value or 50) / 100.0
-    config.videoNegativePrompt = itm.VideoNegativePrompt.Text or ""
-    saveConfig()
-
     -- Resolve the API key for the selected video provider
     local vidApiKey = ""
     if vidPid == "freepik" then
@@ -2648,7 +1783,6 @@ function win.On.GenAllVideos.Clicked(ev)
     if kf then kf:write(vidApiKey); kf:close() end
 
     local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
-    local safeNegative = (config.videoNegativePrompt or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
     local code = 'import json, traceback, time, os, glob, re\n'
         .. 'try:\n'
@@ -2656,7 +1790,6 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
         .. '    from script_to_screen.api.registry import create_video_provider\n'
         .. '    from script_to_screen.pipeline.video_gen import generate_videos_for_screenplay\n'
-        .. '    from script_to_screen.config import GenerationDefaults\n'
         .. '    script_path = "' .. safePath .. '"\n'
         .. '    if script_path.lower().endswith(".pdf"):\n'
         .. '        screenplay = parse_pdf(script_path)\n'
@@ -2668,11 +1801,6 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '        api_key=api_key,\n'
         .. '        server_url="' .. safeServerUrl .. '",\n'
         .. '    )\n'
-        .. '    defaults = GenerationDefaults(\n'
-        .. '        video_model="' .. (config.videoModel or "kling-v3-omni") .. '",\n'
-        .. '        video_cfg_scale=' .. tostring(config.videoCfgScale or 0.5) .. ',\n'
-        .. '        video_negative_prompt="' .. safeNegative .. '",\n'
-        .. '    )\n'
         .. '    # Build image_paths from generated images dir\n'
         .. '    image_dir = "' .. safeOutput .. '/images"\n'
         .. '    image_paths = {}\n'
@@ -2682,12 +1810,9 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '        if m:\n'
         .. '            key = m.group(1)\n'
         .. '            image_paths[key] = f  # latest file per shot wins\n'
-        .. '    custom_prompts = json.loads(\'' .. overridesJson("video"):gsub("'", "\\'") .. '\')\n'
         .. '    results = generate_videos_for_screenplay(\n'
         .. '        screenplay, provider, image_paths,\n'
         .. '        "' .. safeOutput .. '",\n'
-        .. '        defaults=defaults,\n'
-        .. '        custom_prompts=custom_prompts or None,\n'
         .. '        project_slug="' .. projectSlug .. '",\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'
@@ -3563,265 +2688,6 @@ function win.On.AssembleBtn.Clicked(ev)
 end
 
 -- ============================================================
--- PROMPT REVIEW PAGES (Step 5 Images, Step 7 Videos)
--- ============================================================
-
--- Serialize the screenplay path into a form suitable for Python string literals.
-local function safePyString(s)
-    return (s or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
-end
-
--- Load auto prompts for every shot via a single Python call.
--- Fills either autoImagePrompts or autoVideoPrompts depending on `kind`.
-local function loadAutoPrompts(kind)
-    if not screenplayData then return end
-    local path = itm.ScriptPath and itm.ScriptPath.Text or ""
-    if path == "" then return end
-
-    local safePath = safePyString(path)
-    local fn = (kind == "image") and "build_all_image_prompts" or "build_all_motion_prompts"
-    local mod = (kind == "image") and "image_gen" or "video_gen"
-
-    local code = 'import json, traceback\n'
-        .. 'try:\n'
-        .. '    from script_to_screen.parsing.pdf_parser import parse_pdf\n'
-        .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
-        .. '    from script_to_screen.pipeline.' .. mod .. ' import ' .. fn .. '\n'
-        .. '    p = "' .. safePath .. '"\n'
-        .. '    if p.lower().endswith(".pdf"):\n'
-        .. '        sp = parse_pdf(p)\n'
-        .. '    else:\n'
-        .. '        sp = parse_fountain(p)\n'
-        .. '    print(json.dumps({"status":"ok","prompts":' .. fn .. '(sp)}))\n'
-        .. 'except Exception as e:\n'
-        .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
-
-    local result = runPython(code)
-    local jsonStr = result and result:match("(%{.+%})")
-    if not jsonStr then return end
-    local data = JSON.decode(jsonStr)
-    if not data or data.status ~= "ok" or type(data.prompts) ~= "table" then return end
-
-    if kind == "image" then
-        autoImagePrompts = data.prompts
-    else
-        autoVideoPrompts = data.prompts
-    end
-end
-
--- Compute what will actually be sent at generation time for a shot:
--- user override if set, otherwise the auto prompt. Empty string if neither exists.
-local function effectivePromptFor(kind, shotKey)
-    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
-    local autos = (kind == "image") and autoImagePrompts or autoVideoPrompts
-    if overrides[shotKey] ~= nil then return overrides[shotKey] end
-    return autos[shotKey] or ""
-end
-
-local function approvedCount(kind)
-    local approved = (kind == "image") and imagePromptApproved or videoPromptApproved
-    local n = 0
-    for _, v in pairs(approved) do if v then n = n + 1 end end
-    return n
-end
-
--- Update status label and tree row badges for the given review kind.
-local function refreshReviewStatus(kind)
-    if not screenplayData or not screenplayData.scenes then return end
-    local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
-    local statusLbl = (kind == "image") and itm.ImageReviewStatus or itm.VideoReviewStatus
-    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
-    local approved = (kind == "image") and imagePromptApproved or videoPromptApproved
-
-    local total = 0
-    for _, scene in ipairs(screenplayData.scenes) do
-        total = total + #(scene.shots or {})
-    end
-    statusLbl.Text = tostring(approvedCount(kind)) .. " of " .. tostring(total) .. " approved"
-end
-
--- Populate a review tree with one row per shot.
--- (Assigns to the forward-declared `populateReviewTree` so `showStep`
--- above can reach it.)
-populateReviewTree = function(kind)
-    if not screenplayData or not screenplayData.scenes then return end
-    local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
-    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
-    local approved = (kind == "image") and imagePromptApproved or videoPromptApproved
-
-    -- Build auto prompts if we don't have them yet
-    local autos = (kind == "image") and autoImagePrompts or autoVideoPrompts
-    local hasAutos = false
-    for _ in pairs(autos) do hasAutos = true; break end
-    if not hasAutos then loadAutoPrompts(kind) end
-
-    local hdr = tree:NewItem()
-    hdr.Text[0] = "Scene"
-    hdr.Text[1] = "Shot"
-    hdr.Text[2] = "Type"
-    hdr.Text[3] = "State"
-    hdr.Text[4] = "Prompt preview"
-    tree:SetHeaderItem(hdr)
-    tree.ColumnCount = 5
-    tree.ColumnWidth[0] = 60
-    tree.ColumnWidth[1] = 40
-    tree.ColumnWidth[2] = 50
-    tree.ColumnWidth[3] = 90
-    tree.ColumnWidth[4] = 500
-
-    tree:Clear()
-    for _, scene in ipairs(screenplayData.scenes) do
-        for _, shot in ipairs(scene.shots or {}) do
-            local shotKey = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
-            local item = tree:NewItem()
-            item.Text[0] = tostring(scene.index)
-            item.Text[1] = tostring((shot.index or 0) + 1)
-            item.Text[2] = shot.shot_type or ""
-            local edited = (overrides[shotKey] ~= nil)
-            local ok = approved[shotKey] == true
-            local state = "Auto"
-            if edited and ok then state = "Edited \xE2\x9C\x93"
-            elseif edited then state = "Edited"
-            elseif ok then state = "\xE2\x9C\x93 Approved" end
-            item.Text[3] = state
-            local preview = effectivePromptFor(kind, shotKey)
-            if #preview > 120 then preview = preview:sub(1, 117) .. "..." end
-            item.Text[4] = preview
-            -- Color hint: green approved, orange edited, default otherwise
-            pcall(function()
-                if ok then
-                    item.TextColor[3] = {R = 0.4, G = 0.85, B = 0.4, A = 1}
-                elseif edited then
-                    item.TextColor[3] = {R = 0.95, G = 0.65, B = 0.35, A = 1}
-                end
-            end)
-            tree:AddTopLevelItem(item)
-        end
-    end
-
-    refreshReviewStatus(kind)
-end
-
--- Get the shot_key for the currently-selected tree row.
-local function selectedShotKey(kind)
-    local tree = (kind == "image") and itm.ImageReviewTree or itm.VideoReviewTree
-    local item = tree:CurrentItem()
-    if not item then return nil end
-    local sceneIdx = tonumber(item.Text[0])
-    local shotDisplay = tonumber(item.Text[1])
-    if not sceneIdx or not shotDisplay then return nil end
-    return "s" .. tostring(sceneIdx) .. "_sh" .. tostring(shotDisplay - 1)
-end
-
--- Row click → populate the TextEdit with the effective prompt (override > auto).
-function win.On.ImageReviewTree.ItemClicked(ev)
-    local sk = selectedShotKey("image")
-    if not sk then return end
-    itm.ImageReviewEdit.PlainText = effectivePromptFor("image", sk)
-end
-function win.On.VideoReviewTree.ItemClicked(ev)
-    local sk = selectedShotKey("video")
-    if not sk then return end
-    itm.VideoReviewEdit.PlainText = effectivePromptFor("video", sk)
-end
-
--- Save Edit: persist current TextEdit content as override; mark approved.
-function win.On.ImageSaveEdit.Clicked(ev)
-    local sk = selectedShotKey("image")
-    if not sk then return end
-    imagePromptOverrides[sk] = itm.ImageReviewEdit.PlainText or ""
-    imagePromptApproved[sk] = true
-    populateReviewTree("image")
-end
-function win.On.VideoSaveEdit.Clicked(ev)
-    local sk = selectedShotKey("video")
-    if not sk then return end
-    videoPromptOverrides[sk] = itm.VideoReviewEdit.PlainText or ""
-    videoPromptApproved[sk] = true
-    populateReviewTree("video")
-end
-
--- Reset to Auto: drop override and approval for this shot.
-function win.On.ImageResetAuto.Clicked(ev)
-    local sk = selectedShotKey("image")
-    if not sk then return end
-    imagePromptOverrides[sk] = nil
-    imagePromptApproved[sk] = nil
-    itm.ImageReviewEdit.PlainText = autoImagePrompts[sk] or ""
-    populateReviewTree("image")
-end
-function win.On.VideoResetAuto.Clicked(ev)
-    local sk = selectedShotKey("video")
-    if not sk then return end
-    videoPromptOverrides[sk] = nil
-    videoPromptApproved[sk] = nil
-    itm.VideoReviewEdit.PlainText = autoVideoPrompts[sk] or ""
-    populateReviewTree("video")
-end
-
--- Approve This Shot: mark the current shot approved without changing its text.
-function win.On.ImageApproveOne.Clicked(ev)
-    local sk = selectedShotKey("image")
-    if not sk then return end
-    imagePromptApproved[sk] = true
-    populateReviewTree("image")
-end
-function win.On.VideoApproveOne.Clicked(ev)
-    local sk = selectedShotKey("video")
-    if not sk then return end
-    videoPromptApproved[sk] = true
-    populateReviewTree("video")
-end
-
--- Approve All: mark every shot approved.
-function win.On.ImageApproveAll.Clicked(ev)
-    if not screenplayData then return end
-    for _, scene in ipairs(screenplayData.scenes) do
-        for _, shot in ipairs(scene.shots or {}) do
-            local sk = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
-            imagePromptApproved[sk] = true
-        end
-    end
-    populateReviewTree("image")
-end
-function win.On.VideoApproveAll.Clicked(ev)
-    if not screenplayData then return end
-    for _, scene in ipairs(screenplayData.scenes) do
-        for _, shot in ipairs(scene.shots or {}) do
-            local sk = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
-            videoPromptApproved[sk] = true
-        end
-    end
-    populateReviewTree("video")
-end
-
--- Refresh Auto Prompts: re-call Python to rebuild autos (useful after
--- editing character refs, changing model, etc.).
-function win.On.ImageRefreshAuto.Clicked(ev)
-    autoImagePrompts = {}
-    loadAutoPrompts("image")
-    populateReviewTree("image")
-end
-function win.On.VideoRefreshAuto.Clicked(ev)
-    autoVideoPrompts = {}
-    loadAutoPrompts("video")
-    populateReviewTree("video")
-end
-
--- Serialize overrides to a JSON string payload for custom_prompts= passthrough.
--- Only includes explicitly-edited shots; auto prompts are left to the backend.
-local function overridesJson(kind)
-    local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
-    local parts = {}
-    for k, v in pairs(overrides) do
-        local safeK = k:gsub('"', '\\"')
-        local safeV = v:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "")
-        table.insert(parts, '"' .. safeK .. '":"' .. safeV .. '"')
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-end
-
--- ============================================================
 -- POPULATE TREES WHEN ENTERING STEPS
 -- ============================================================
 
@@ -3854,32 +2720,12 @@ local function populateImageTree()
             local desc = shot.description or ""
             if #desc > 80 then desc = desc:sub(1, 77) .. "..." end
             item.Text[3] = desc
-            -- Python-format shot key (matches generatedImages / failedImages keys)
-            local shotKey = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
-            if generatedImages[shotKey] then
-                item.Text[4] = "Done"
-                pcall(function() item.TextColor[4] = {R = 0.4, G = 0.85, B = 0.4, A = 1} end)
-            elseif failedImages[shotKey] then
-                item.Text[4] = "Failed"
-                pcall(function() item.TextColor[4] = {R = 0.95, G = 0.35, B = 0.35, A = 1} end)
-            else
-                item.Text[4] = "Pending"
-            end
+            -- Check if image already generated
+            local key = tostring(scene.index) .. "_" .. tostring(shot.index or 0)
+            item.Text[4] = generatedImages[key] and "Done" or "Pending"
             itm.ImageTree:AddTopLevelItem(item)
         end
     end
-    -- Update the Retry Failed button label with count (if button exists yet)
-    pcall(function()
-        local n = 0
-        for _ in pairs(failedImages) do n = n + 1 end
-        if n > 0 then
-            itm.RetryFailedImages.Text = "Retry Failed (" .. tostring(n) .. ")"
-            itm.RetryFailedImages.Enabled = true
-        else
-            itm.RetryFailedImages.Text = "Retry Failed"
-            itm.RetryFailedImages.Enabled = false
-        end
-    end)
 end
 
 local function populateVideoTree()
@@ -4001,11 +2847,11 @@ function win.On.NextBtn.Clicked(ev) onNext() end
 function win.On.NextBtn2.Clicked(ev) onNext() end
 function win.On.NextBtn3.Clicked(ev) onNext() end
 function win.On.NextBtn4.Clicked(ev) onNext() end
+function win.On.NextBtn5.Clicked(ev) onNext() end
+function win.On.NextBtn6.Clicked(ev) onNext() end
 function win.On.NextBtn7.Clicked(ev) onNext() end
 function win.On.NextBtn8.Clicked(ev) onNext() end
 function win.On.NextBtn9.Clicked(ev) onNext() end
-function win.On.NextBtn10.Clicked(ev) onNext() end
-function win.On.NextBtn11.Clicked(ev) onNext() end
 
 -- ============================================================
 -- SHOW AND RUN

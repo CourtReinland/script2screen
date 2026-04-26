@@ -30,16 +30,6 @@ class FreepikImageProvider(ImageProvider):
             model=kwargs.get("model", self.model),
             aspect_ratio=aspect_ratio,
             creative_detailing=kwargs.get("creative_detailing", 33),
-            # Per-model Mystic options (safe defaults match legacy behavior)
-            engine=kwargs.get("freepik_engine", "automatic"),
-            resolution=kwargs.get("freepik_resolution", "2k"),
-            structure_strength=kwargs.get("freepik_structure_strength", 50),
-            structure_reference_path=kwargs.get("structure_reference_path"),
-            webhook_url=kwargs.get("webhook_url"),
-            # Multi-API dispatch: mystic / flux-* / seedream-* / hyperflux /
-            # z-image-turbo / runway. Defaults to "mystic" for back-compat.
-            image_api=kwargs.get("freepik_image_api", "mystic"),
-            seed=kwargs.get("seed"),
         )
 
     def check_image_status(self, task_id: str) -> dict:
@@ -85,8 +75,6 @@ class FreepikVideoProvider(VideoProvider):
             duration=duration,
             negative_prompt=kwargs.get("negative_prompt", ""),
             cfg_scale=kwargs.get("cfg_scale", 0.5),
-            model=kwargs.get("video_model", kwargs.get("model", "kling-v3-omni")),
-            webhook_url=kwargs.get("webhook_url"),
         )
 
     def check_video_status(self, task_id: str) -> dict:
