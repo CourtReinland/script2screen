@@ -81,7 +81,7 @@ def reprompt_image(
         )
 
         result = poll_until_complete(
-            task_id, provider.check_image_status, timeout=600, interval=10
+            task_id, provider.check_image_status, timeout=600, interval=10, label=shot_key
         )
 
         images = result.get("images", [])
@@ -149,7 +149,7 @@ def reprompt_video(
         )
 
         result = poll_until_complete(
-            task_id, provider.check_video_status, timeout=600, interval=10
+            task_id, provider.check_video_status, timeout=600, interval=10, label=shot_key
         )
 
         videos = result.get("videos", [])
@@ -284,7 +284,7 @@ def generate_lipsync_standalone(
         task_id = provider.generate_lipsync(video_path, audio_path)
 
         result = poll_until_complete(
-            task_id, provider.check_lipsync_status, timeout=600, interval=10
+            task_id, provider.check_lipsync_status, timeout=600, interval=10, label=shot_key or 'lipsync'
         )
 
         videos = result.get("videos", [])

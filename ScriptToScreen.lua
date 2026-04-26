@@ -233,9 +233,15 @@ local function runPython(code)
     local dbg = io.open("/tmp/sts_last_script.py", "w")
     if dbg then dbg:write(preamble .. code); dbg:close() end
 
-    -- Execute and capture output
+    -- Execute and capture output.
+    -- ``-u`` forces Python to unbuffer stdout/stderr so long-running ops
+    -- (image polling, video polling, lip-sync polling) emit progress lines
+    -- live. ``tee`` duplicates them to BOTH the temp file (so Lua can read
+    -- the JSON result at the end) AND the parent stdout, where Resolve's
+    -- Console window shows them as they happen — critical for diagnosing
+    -- silent hangs.
     local outfile = os.tmpname()
-    local cmd = pythonCmd .. ' "' .. tmpfile .. '" > "' .. outfile .. '" 2>&1'
+    local cmd = pythonCmd .. ' -u "' .. tmpfile .. '" 2>&1 | tee "' .. outfile .. '"'
     os.execute(cmd)
 
     local out = io.open(outfile, "r")
@@ -2045,7 +2051,7 @@ function win.On.GenAllImages.Clicked(ev)
         return
     end
 
-    itm.ImageProgress.Text = "Generating images... (this may take several minutes)"
+    itm.ImageProgress.Text = "Generating images... watch Workspace > Console for live polling progress."
     itm.ImageProgress.StyleSheet = "color: #888;"
 
     local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')

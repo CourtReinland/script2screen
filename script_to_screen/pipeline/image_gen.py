@@ -209,12 +209,17 @@ def generate_images_for_screenplay(
             )
             logger.info(f"[{shot_key}] Queued as task {task_id}")
 
-            # Use a generous timeout — CPU-mode Flux can take 20+ min per image
+            # Cloud APIs typically finish within 1-3 minutes; 10 minutes is
+            # a generous ceiling. Local ComfyUI can be slower, but most
+            # users running it know to bump this. The polling loop also
+             # aborts after 5 consecutive errors so a stuck task can't
+            # silently waste an hour.
             result = poll_until_complete(
                 task_id,
                 provider.check_image_status,
-                timeout=1800,
-                interval=10,
+                timeout=600,
+                interval=5,
+                label=shot_key,
             )
 
             images = result.get("images", [])
@@ -305,7 +310,8 @@ def regenerate_single_image(
         )
 
         result = poll_until_complete(
-            task_id, provider.check_image_status, timeout=300, interval=5,
+            task_id, provider.check_image_status, timeout=600, interval=5,
+            label=shot_key,
         )
 
         images = result.get("images", [])

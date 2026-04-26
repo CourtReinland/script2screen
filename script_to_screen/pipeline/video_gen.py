@@ -154,6 +154,7 @@ def generate_videos_for_screenplay(
                 provider.check_video_status,
                 timeout=600,
                 interval=10,
+                label=shot_key,
             )
 
             videos = result.get("videos", [])
@@ -222,6 +223,7 @@ def regenerate_single_video(
 
         result = poll_until_complete(
             task_id, provider.check_video_status, timeout=600, interval=10,
+            label=shot_key,
         )
 
         videos = result.get("videos", [])

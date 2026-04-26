@@ -89,6 +89,7 @@ def generate_lipsync_for_shots(
                 provider.check_lipsync_status,
                 timeout=600,
                 interval=10,
+                label=shot_key,
             )
 
             videos = result.get("videos", [])

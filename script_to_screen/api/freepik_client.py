@@ -201,6 +201,11 @@ class FreepikClient:
         Mystic task_ids are unnamespaced (legacy). Non-Mystic task_ids are
         prefixed with ``"<image_api>:"`` (set in generate_image) so we know
         which endpoint to poll.
+
+        Different Freepik endpoints return slightly different shapes —
+        Mystic uses ``data.generated[]`` for image URLs, the newer Flux/
+        Seedream endpoints sometimes use ``data.images[]`` or
+        ``data.result[]``. We probe a few common keys before giving up.
         """
         if ":" in task_id and task_id.split(":", 1)[0] in IMAGE_ENDPOINTS:
             api, raw_id = task_id.split(":", 1)
@@ -209,11 +214,49 @@ class FreepikClient:
         path = IMAGE_ENDPOINTS.get(api, IMAGE_ENDPOINTS["mystic"])
 
         resp = self._get(f"{BASE_URL}{path}/{raw_id}")
-        data = resp.get("data", resp)
+        data = resp.get("data", resp) or {}
+
+        # Status: try common locations
+        status = (
+            data.get("status")
+            or data.get("task_status")
+            or resp.get("status")
+            or "UNKNOWN"
+        )
+
+        # Image URLs: probe each known key. Different Freepik endpoints
+        # return them at different paths.
+        images = []
+        for key in ("generated", "images", "image_urls", "results", "result"):
+            val = data.get(key)
+            if val:
+                # Some endpoints return a list of strings (URLs); others
+                # return a list of objects with a "url" field.
+                if isinstance(val, list):
+                    if val and isinstance(val[0], dict):
+                        images = [v.get("url") or v.get("image_url") or v
+                                  for v in val if v]
+                    else:
+                        images = list(val)
+                elif isinstance(val, dict):
+                    inner = val.get("url") or val.get("image_url")
+                    if inner:
+                        images = [inner]
+                if images:
+                    break
+
+        # Error: try common locations
+        error = (
+            data.get("error")
+            or data.get("error_message")
+            or data.get("message")
+            or resp.get("error")
+        )
+
         return {
-            "status": data.get("status", "UNKNOWN"),
-            "images": data.get("generated", []),
-            "error": data.get("error", None),
+            "status": status,
+            "images": images,
+            "error": error,
         }
 
     def download_image(self, url: str, save_path: str) -> str:
