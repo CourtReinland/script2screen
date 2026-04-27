@@ -1416,7 +1416,17 @@ local function refreshProviderControls()
 end
 
 -- Re-run visibility logic when the user picks a different Freepik API.
+-- Suppress the CurrentIndexChanged handler during wizard initialization.
+-- Programmatic CurrentIndex assignments (e.g. from setComboToValue while
+-- restoring the saved API) would otherwise fire the handler before the
+-- window is fully laid out, which has produced flaky StylePage layout
+-- (Browse-button intercept, OpenAI rows clipping into the page header)
+-- in some Resolve versions. The flag is cleared at the end of init so
+-- subsequent USER-driven changes do trigger refreshProviderControls.
+local _initInProgress = true
+
 function win.On.FreepikApiCombo.CurrentIndexChanged(ev)
+    if _initInProgress then return end
     local name = itm.FreepikApiCombo.CurrentText or ""
     config.freepikImageApi = freepikApiNameToId(name)
     saveConfig()
@@ -1424,6 +1434,7 @@ function win.On.FreepikApiCombo.CurrentIndexChanged(ev)
 end
 
 refreshProviderControls()
+_initInProgress = false
 
 itm.ResCombo:AddItem("1920x1080")
 itm.ResCombo:AddItem("3840x2160")
@@ -1797,7 +1808,13 @@ end
 -- ============================================================
 
 function win.On.BrowseScript.Clicked(ev)
-    local path = fu:RequestFile("Select Screenplay")
+    local ok, path = pcall(function()
+        return fu:RequestFile("Select Screenplay")
+    end)
+    if not ok then
+        print("[ScriptToScreen] BrowseScript error: " .. tostring(path))
+        return
+    end
     if path and path ~= "" then
         itm.ScriptPath.Text = path
     end
@@ -1990,9 +2007,18 @@ end
 
 function win.On.BrowseCharImg.Clicked(ev)
     local selected = itm.CharTree:CurrentItem()
-    if not selected then return end
+    if not selected then
+        print("[ScriptToScreen] BrowseCharImg: no character selected — click a row in the tree first")
+        return
+    end
     local charName = selected.Text[0]
-    local path = fu:RequestFile("Select Reference Image for " .. charName)
+    local ok, path = pcall(function()
+        return fu:RequestFile("Select Reference Image for " .. charName)
+    end)
+    if not ok then
+        print("[ScriptToScreen] BrowseCharImg error: " .. tostring(path))
+        return
+    end
     if path and path ~= "" then
         characterImages[charName] = path
         selected.Text[2] = path
@@ -2019,7 +2045,16 @@ end
 -- ============================================================
 
 function win.On.BrowseStyle.Clicked(ev)
-    local path = fu:RequestFile("Select Style Reference Image")
+    -- pcall guards against any Resolve-version-specific quirks in
+    -- fu:RequestFile (we've seen transient layout-state bugs cause this
+    -- to silently no-op when the wizard window is mid-relayout).
+    local ok, path = pcall(function()
+        return fu:RequestFile("Select Style Reference Image")
+    end)
+    if not ok then
+        print("[ScriptToScreen] BrowseStyle error: " .. tostring(path))
+        return
+    end
     if path and path ~= "" then
         itm.StylePath.Text = path
     end
