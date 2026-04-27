@@ -231,6 +231,29 @@ def _register_builtins():
     except ImportError:
         logger.debug("OpenAI image provider not available")
 
+    # OpenAI Sora (cloud video generation)
+    try:
+        from .openai_video_provider import OpenAIVideoProvider
+
+        register_video_provider(
+            ProviderInfo(
+                id="openai",
+                name="OpenAI Sora 2",
+                category="video",
+                requires_api_key=True,
+                requires_server_url=False,
+                description=(
+                    "Cloud video generation via OpenAI Sora 2 / Sora 2 Pro. "
+                    "Text-to-video only (no start-image input). "
+                    "Resolutions: 1280x720, 720x1280, 1024x1792, 1792x1024. "
+                    "Durations: 4 / 8 / 12 seconds. Choose model in Step 8."
+                ),
+            ),
+            lambda api_key="", **kw: OpenAIVideoProvider(api_key, **kw),
+        )
+    except ImportError:
+        logger.debug("OpenAI video provider not available")
+
     # Grok Imagine (xAI cloud) providers
     try:
         from .grok_provider import GrokImageProvider, GrokVideoProvider

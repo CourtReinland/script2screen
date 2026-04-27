@@ -1136,6 +1136,7 @@ local imageProviders = {
 local videoProviders = {
     {id = "freepik",      name = "Freepik (Cloud — Kling, Seedance, MiniMax, Wan)"},
     {id = "grok",         name = "Grok Imagine Video (Cloud)"},
+    {id = "openai",       name = "OpenAI Sora 2 (Cloud)"},
     {id = "comfyui_ltx",  name = "LTX 2.3 (Local ComfyUI)"},
 }
 local voiceProviders = {
@@ -1193,7 +1194,7 @@ end
 
 local function updateVideoProviderFields()
     local id = getVideoProviderId(itm.VideoProviderCombo.CurrentIndex)
-    local isCloud = (id == "freepik" or id == "grok")
+    local isCloud = (id == "freepik" or id == "grok" or id == "openai")
     itm.VideoApiKey.Enabled = isCloud
     itm.VideoServerUrl.Enabled = not isCloud
     if id == "freepik" then
@@ -1202,6 +1203,9 @@ local function updateVideoProviderFields()
     elseif id == "grok" then
         itm.VideoApiKey.PlaceholderText = "xAI API key..."
         itm.VideoApiKey.Text = config.providers.grok.apiKey or ""
+    elseif id == "openai" then
+        itm.VideoApiKey.PlaceholderText = "OpenAI API key (sk-...)..."
+        itm.VideoApiKey.Text = config.providers.openai and config.providers.openai.apiKey or ""
     else
         itm.VideoApiKey.PlaceholderText = "(not needed)"
         itm.VideoApiKey.Text = ""
@@ -1350,6 +1354,7 @@ setComboToValue(itm.OpenAIBgCombo, openaiBackgrounds, config.openaiBackground)
 
 -- Video model selector (Step 8)
 local videoModels = {
+    -- Freepik-hosted (require Freepik provider)
     "kling-v3-omni",
     "kling-v2-5-pro",
     "kling-v2-6-pro",
@@ -1357,6 +1362,9 @@ local videoModels = {
     "seedance-pro-1080p",
     "minimax-hailuo-2-3",
     "wan-v2-6-1080p",
+    -- OpenAI Sora (require OpenAI provider)
+    "sora-2",
+    "sora-2-pro",
 }
 for _, vm in ipairs(videoModels) do
     itm.VideoModelCombo:AddItem(vm)
@@ -1726,7 +1734,7 @@ function win.On.TestVideoProvider.Clicked(ev)
     local pid = getVideoProviderId(itm.VideoProviderCombo.CurrentIndex)
     local key = (itm.VideoApiKey.Text or ""):match("^%s*(.-)%s*$")
     local url = itm.VideoServerUrl.Text or ""
-    if (pid == "freepik" or pid == "grok") and key == "" then
+    if (pid == "freepik" or pid == "grok" or pid == "openai") and key == "" then
         itm.VideoProviderStatus.Text = "No key"
         itm.VideoProviderStatus.StyleSheet = "color: orange;"
         return
@@ -1736,6 +1744,8 @@ function win.On.TestVideoProvider.Clicked(ev)
             config.providers.freepik.apiKey = key
         elseif pid == "grok" then
             config.providers.grok.apiKey = key
+        elseif pid == "openai" then
+            config.providers.openai.apiKey = key
         end
         config.providers.comfyui.serverUrl = url
         config.videoProvider = pid
@@ -2626,6 +2636,11 @@ function win.On.GenAllVideos.Clicked(ev)
         itm.VideoProgress.StyleSheet = "color: red;"
         return
     end
+    if vidPid == "openai" and (config.providers.openai and config.providers.openai.apiKey or "") == "" then
+        itm.VideoProgress.Text = "Set OpenAI API key first (Step 1)!"
+        itm.VideoProgress.StyleSheet = "color: red;"
+        return
+    end
 
     itm.VideoProgress.Text = "Generating videos... (this will take a while)"
     itm.VideoProgress.StyleSheet = "color: #888;"
@@ -2646,6 +2661,8 @@ function win.On.GenAllVideos.Clicked(ev)
         vidApiKey = config.providers.freepik.apiKey or ""
     elseif vidPid == "grok" then
         vidApiKey = config.providers.grok.apiKey or ""
+    elseif vidPid == "openai" then
+        vidApiKey = config.providers.openai and config.providers.openai.apiKey or ""
     end
 
     -- Write API key to temp file
