@@ -1453,6 +1453,14 @@ itm.FPSCombo:AddItem("30")
 -- parsed earlier in the same chunk).
 local populateReviewTree
 
+-- Same problem for overridesJson: referenced by GenAllImages /
+-- RetryFailedImages / GenAllVideos handlers (defined at ~L2200/2450/2743)
+-- but the actual implementation lives at ~L3870. Without this forward
+-- declaration, those handlers see overridesJson as a global lookup and
+-- crash with "attempt to call global 'overridesJson' (a nil value)" the
+-- moment the user clicks Generate All Images.
+local overridesJson
+
 local function showStep(step)
     currentStep = step
     itm.PageStack.CurrentIndex = step - 1
@@ -3868,7 +3876,10 @@ end
 
 -- Serialize overrides to a JSON string payload for custom_prompts= passthrough.
 -- Only includes explicitly-edited shots; auto prompts are left to the backend.
-local function overridesJson(kind)
+-- Assigns to the forward-declared `overridesJson` so GenAllImages /
+-- RetryFailedImages / GenAllVideos (which run far above this point) can
+-- reach it via the upvalue.
+overridesJson = function(kind)
     local overrides = (kind == "image") and imagePromptOverrides or videoPromptOverrides
     local parts = {}
     for k, v in pairs(overrides) do
