@@ -185,6 +185,43 @@ function JSON.encode(val)
     return "null"
 end
 
+-- Convert any value to a safe display string. Used in error-message
+-- construction so an unexpected response shape (e.g. data.error coming
+-- back as a table from a misparsed Python output) doesn't crash the
+-- wizard with "attempt to concatenate a table value".
+local function asString(v)
+    if v == nil then return "" end
+    local t = type(v)
+    if t == "string" then return v end
+    if t == "table" then
+        local ok, s = pcall(JSON.encode, v)
+        return ok and tostring(s) or "<table>"
+    end
+    return tostring(v)
+end
+
+-- Extract the LAST JSON-shaped line from a multi-line Python-output blob.
+-- The naive ``str:match("(%{.+%})")`` pattern grabs the FIRST {...} on
+-- any single line, which is fragile now that polling diagnostics also
+-- print to stdout (a Python warning, dict repr, or stack-trace line
+-- containing braces would short-circuit the match before reaching the
+-- actual final json.dumps() result). Python's final result is always the
+-- last line that starts with `{"` and ends with `}` — we walk the lines,
+-- keep updating, and return the last match.
+local function extractLastJsonLine(result)
+    if not result or result == "" then return nil end
+    local last = nil
+    for line in result:gmatch("[^\n]+") do
+        local m = line:match("^%s*({.+})%s*$")
+        -- Require a literal `"` in the match — distinguishes JSON from
+        -- Python's dict repr which uses single quotes.
+        if m and m:find('"', 1, true) then
+            last = m
+        end
+    end
+    return last
+end
+
 -- ============================================================
 -- UTILITY
 -- ============================================================
@@ -2220,7 +2257,7 @@ function win.On.GenAllImages.Clicked(ev)
     local result = runPython(code)
     os.remove(keyfile)
 
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if jsonStr then
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
@@ -2304,7 +2341,7 @@ function win.On.GenAllImages.Clicked(ev)
                 end
             elseif totalShots > 0 then
                 -- Had shots but all failed
-                local firstErr = errs[1] or "Unknown error"
+                local firstErr = asString(errs[1] or "Unknown error")
                 itm.ImageProgress.Text = "All " .. tostring(totalShots) .. " images failed: " .. firstErr
                 itm.ImageProgress.StyleSheet = "color: red;"
             else
@@ -2312,7 +2349,7 @@ function win.On.GenAllImages.Clicked(ev)
                 itm.ImageProgress.StyleSheet = "color: red;"
             end
         else
-            itm.ImageProgress.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.ImageProgress.Text = "Error: " .. asString((data and data.error) or "Unknown")
             itm.ImageProgress.StyleSheet = "color: red;"
             -- Show traceback in console
             if data and data.trace then
@@ -2501,7 +2538,7 @@ function win.On.RetryFailedImages.Clicked(ev)
     local result = runPython(code)
     os.remove(keyfile)
 
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if not jsonStr then
         itm.ImageProgress.Text = "Retry failed — raw output: " .. tostring(result or ""):sub(1, 100)
         itm.ImageProgress.StyleSheet = "color: red;"
@@ -2641,7 +2678,7 @@ function win.On.ImageTree.ItemClicked(ev)
             .. '            print(json.dumps({"prompt": prompt}))\n'
             .. '            break\n'
         )
-        local jStr = result and result:match("(%{.+%})")
+        local jStr = extractLastJsonLine(result)
         if jStr then
             local data = JSON.decode(jStr)
             if data and data.prompt then
@@ -2764,7 +2801,7 @@ function win.On.GenAllVideos.Clicked(ev)
     local result = runPython(code)
     os.remove(keyfile)
 
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if jsonStr then
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
@@ -2834,7 +2871,7 @@ function win.On.GenAllVideos.Clicked(ev)
                 itm.VideoProgress.StyleSheet = "color: red;"
             end
         else
-            itm.VideoProgress.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.VideoProgress.Text = "Error: " .. asString((data and data.error) or "Unknown")
             itm.VideoProgress.StyleSheet = "color: red;"
             if data and data.trace then
                 print("[ScriptToScreen] " .. data.trace)
@@ -2891,7 +2928,7 @@ function win.On.FetchCloudVoices.Clicked(ev)
     local result = runPython(code)
     os.remove(keyfile)
 
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if jsonStr then
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
@@ -2920,7 +2957,7 @@ function win.On.FetchCloudVoices.Clicked(ev)
             itm.VoiceProgress.Text = tostring(#cloudVoices) .. " voices loaded — select a character, pick a voice, click Assign"
             itm.VoiceProgress.StyleSheet = "color: green;"
         else
-            itm.VoiceProgress.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.VoiceProgress.Text = "Error: " .. asString((data and data.error) or "Unknown")
             itm.VoiceProgress.StyleSheet = "color: red;"
         end
     else
@@ -3043,7 +3080,7 @@ function win.On.CloneVoice.Clicked(ev)
     local result = runPython(code)
     os.remove(keyfile)
 
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if jsonStr then
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
@@ -3052,7 +3089,7 @@ function win.On.CloneVoice.Clicked(ev)
             itm.VoiceProgress.Text = "Voice cloned for " .. charName .. "!"
             itm.VoiceProgress.StyleSheet = "color: green; font-weight: bold;"
         else
-            itm.VoiceProgress.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.VoiceProgress.Text = "Error: " .. asString((data and data.error) or "Unknown")
             itm.VoiceProgress.StyleSheet = "color: red;"
         end
     else
@@ -3124,7 +3161,7 @@ function win.On.GenAllDialogue.Clicked(ev)
     local result = runPython(code)
     os.remove(keyfile)
 
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if jsonStr then
         local data = JSON.decode(jsonStr)
         if data and data.status == "ok" then
@@ -3182,7 +3219,7 @@ function win.On.GenAllDialogue.Clicked(ev)
             end
             itm.DialogueProgress.StyleSheet = "color: green; font-weight: bold;"
         else
-            itm.DialogueProgress.Text = "Error: " .. (data and data.error or "Unknown")
+            itm.DialogueProgress.Text = "Error: " .. asString((data and data.error) or "Unknown")
             itm.DialogueProgress.StyleSheet = "color: red;"
         end
     else
@@ -3332,7 +3369,7 @@ function win.On.SyncAll.Clicked(ev)
             .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
 
         local result = runPython(code)
-        local jsonStr = result and result:match("(%{.+%})")
+        local jsonStr = extractLastJsonLine(result)
         if jsonStr then
             local data = JSON.decode(jsonStr)
             if data and data.status == "ok" then
@@ -3663,7 +3700,7 @@ local function loadAutoPrompts(kind)
         .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
 
     local result = runPython(code)
-    local jsonStr = result and result:match("(%{.+%})")
+    local jsonStr = extractLastJsonLine(result)
     if not jsonStr then return end
     local data = JSON.decode(jsonStr)
     if not data or data.status ~= "ok" or type(data.prompts) ~= "table" then return end
