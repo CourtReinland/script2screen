@@ -885,7 +885,12 @@ local win = disp:AddWindow({
                     ui:Label{ID = "FreepikStructureValue", Text = "50", Weight = 0.2},
                 },
 
-                -- OpenAI gpt-image-2 per-model options (shown only when imageProvider == "openai")
+                -- OpenAI image gen per-model options (shown only when imageProvider == "openai")
+                ui:HGroup{
+                    ID = "OpenAIModelRow",
+                    ui:Label{Text = "Model (OpenAI):", Weight = 0.2},
+                    ui:ComboBox{ID = "OpenAIModelCombo", Weight = 0.8},
+                },
                 ui:HGroup{
                     ID = "OpenAIQualityRow",
                     ui:Label{Text = "Quality (OpenAI):", Weight = 0.2},
@@ -1348,6 +1353,19 @@ local freepikResolutions = {"1k", "2k", "4k"}
 for _, v in ipairs(freepikResolutions) do itm.FreepikResolutionCombo:AddItem(v) end
 
 -- OpenAI gpt-image-2 per-model combos
+-- OpenAI image-gen models. gpt-image-1 is the default because gpt-image-2
+-- requires organization verification — see SUPPORTED_MODELS in
+-- script_to_screen/api/openai_image_client.py
+local openaiModels = {
+    "gpt-image-1",
+    "gpt-image-1-mini",
+    "gpt-image-1.5",
+    "gpt-image-2",
+    "dall-e-3",
+    "dall-e-2",
+}
+for _, v in ipairs(openaiModels) do itm.OpenAIModelCombo:AddItem(v) end
+
 local openaiQualities = {"auto", "low", "medium", "high"}
 for _, v in ipairs(openaiQualities) do itm.OpenAIQualityCombo:AddItem(v) end
 local openaiSizes = {"auto", "1024x1024", "1536x1024", "1024x1536"}
@@ -1384,6 +1402,7 @@ do
     for _, a in ipairs(freepikImageApis) do table.insert(names, a.name) end
     setComboToValue(itm.FreepikApiCombo, names, freepikApiIdToName(savedApi))
 end
+setComboToValue(itm.OpenAIModelCombo, openaiModels, config.openaiModel or "gpt-image-1")
 setComboToValue(itm.OpenAIQualityCombo, openaiQualities, config.openaiQuality)
 setComboToValue(itm.OpenAISizeCombo, openaiSizes, config.openaiSize)
 setComboToValue(itm.OpenAIFormatCombo, openaiFormats, config.openaiOutputFormat)
@@ -1446,6 +1465,7 @@ local function refreshProviderControls()
     setRow(itm.FreepikResolutionRow, isMystic)
     setRow(itm.FreepikStructureRow,  isMystic)
     -- OpenAI options
+    setRow(itm.OpenAIModelRow,       isOpenAI)
     setRow(itm.OpenAIQualityRow,     isOpenAI)
     setRow(itm.OpenAISizeRow,        isOpenAI)
     setRow(itm.OpenAIFormatRow,      isOpenAI)
@@ -1587,7 +1607,8 @@ local function onNext()
         config.freepikEngine = itm.FreepikEngineCombo.CurrentText or "automatic"
         config.freepikResolution = itm.FreepikResolutionCombo.CurrentText or "2k"
         config.freepikStructureStrength = itm.FreepikStructureSlider.Value or 50
-        -- OpenAI gpt-image-2 per-model options
+        -- OpenAI image-gen per-model options
+        config.openaiModel = itm.OpenAIModelCombo.CurrentText or "gpt-image-1"
         config.openaiQuality = itm.OpenAIQualityCombo.CurrentText or "auto"
         config.openaiSize = itm.OpenAISizeCombo.CurrentText or "auto"
         config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or "png"
@@ -2234,6 +2255,7 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        freepik_engine="' .. (config.freepikEngine or "automatic") .. '",\n'
         .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
         .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
+        .. '        openai_model="' .. (config.openaiModel or "gpt-image-1") .. '",\n'
         .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
         .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
         .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
@@ -2485,6 +2507,7 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '        freepik_engine="' .. (config.freepikEngine or "automatic") .. '",\n'
         .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
         .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
+        .. '        openai_model="' .. (config.openaiModel or "gpt-image-1") .. '",\n'
         .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
         .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
         .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'

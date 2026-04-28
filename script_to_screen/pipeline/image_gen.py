@@ -202,6 +202,7 @@ def generate_images_for_screenplay(
                 # Freepik multi-API dispatch (mystic / flux-* / seedream-* / ...)
                 freepik_image_api=defaults.freepik_image_api,
                 # OpenAI per-model options (ignored by other providers)
+                openai_model=defaults.openai_model,
                 openai_quality=defaults.openai_quality,
                 openai_size=defaults.openai_size,
                 openai_output_format=defaults.openai_output_format,
@@ -303,6 +304,7 @@ def regenerate_single_image(
             freepik_resolution=defaults.freepik_resolution,
             freepik_structure_strength=defaults.freepik_structure_strength,
             freepik_image_api=defaults.freepik_image_api,
+            openai_model=defaults.openai_model,
             openai_quality=defaults.openai_quality,
             openai_size=defaults.openai_size,
             openai_output_format=defaults.openai_output_format,

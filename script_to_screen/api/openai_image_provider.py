@@ -46,6 +46,20 @@ class OpenAIImageProvider(ImageProvider):
                 "[OpenAI] style_reference_path provided but not supported "
                 "by gpt-image-2 generations endpoint; ignoring."
             )
+        # Prefer the OpenAI-specific model override; the generic ``model``
+        # kwarg often arrives as a Freepik Mystic style name (e.g. "realism")
+        # which OpenAI would 400 on. If we receive something that's not in
+        # OpenAI's SUPPORTED_MODELS, fall back to the safe default.
+        from .openai_image_client import SUPPORTED_MODELS, DEFAULT_MODEL
+        chosen = kwargs.get("openai_model") or kwargs.get("model") or self.model
+        if chosen not in SUPPORTED_MODELS:
+            logger.info(
+                f"[OpenAI] {chosen!r} is not a recognized OpenAI image model "
+                f"— falling back to {DEFAULT_MODEL!r}. Set openai_model on "
+                f"GenerationDefaults to choose explicitly."
+            )
+            chosen = DEFAULT_MODEL
+
         return self._client.generate_image(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
@@ -54,7 +68,7 @@ class OpenAIImageProvider(ImageProvider):
             output_format=kwargs.get("openai_output_format", "png"),
             background=kwargs.get("openai_background", "auto"),
             n=kwargs.get("n", 1),
-            model=kwargs.get("model") or self.model,
+            model=chosen,
         )
 
     def check_image_status(self, task_id: str) -> dict:

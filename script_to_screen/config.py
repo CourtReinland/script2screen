@@ -60,7 +60,10 @@ class GenerationDefaults:
     freepik_engine: str = "automatic"              # automatic | magnific_sparkle | magnific_illusio | magnific_sharpy
     freepik_resolution: str = "2k"                 # 1k | 2k | 4k
     freepik_structure_strength: int = 50           # 0-100 (only when structure reference is set)
-    # OpenAI gpt-image-2 per-model options
+    # OpenAI image gen per-model options
+    # Default to gpt-image-1 because gpt-image-2 requires org verification
+    # (https://platform.openai.com/settings/organization/general).
+    openai_model: str = "gpt-image-1"              # see SUPPORTED_MODELS in openai_image_client
     openai_quality: str = "auto"                   # low | medium | high | auto
     openai_size: str = "auto"                      # 1024x1024 | 1536x1024 | 1024x1536 | auto
     openai_output_format: str = "png"              # png | jpeg | webp

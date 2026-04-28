@@ -22,7 +22,21 @@ import requests
 logger = logging.getLogger("ScriptToScreen")
 
 BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-image-2"
+# Default to gpt-image-1: works for unverified OpenAI orgs. gpt-image-2
+# requires organization verification (https://platform.openai.com/settings/organization/general)
+# and returns 400 "Your organization must be verified..." otherwise.
+DEFAULT_MODEL = "gpt-image-1"
+
+# Models supported by /v1/images/generations as of Apr 2026. Used by the
+# wizard's Step 4 model dropdown. Order = recommended-first for UI.
+SUPPORTED_MODELS = [
+    "gpt-image-1",         # default — no org verification required
+    "gpt-image-1-mini",    # cheaper/faster variant
+    "gpt-image-1.5",       # newer; may need verification
+    "gpt-image-2",         # newest; REQUIRES org verification
+    "dall-e-3",            # legacy
+    "dall-e-2",            # legacy
+]
 
 # Map ScriptToScreen aspect-ratio slugs → OpenAI explicit size strings.
 # Anything not in this map falls back to "auto" (model picks).
@@ -133,8 +147,23 @@ class OpenAIImageClient:
         )
 
         if r.status_code != 200:
-            logger.error(f"[OpenAI] images/generations failed: {r.status_code} {r.text[:400]}")
-        r.raise_for_status()
+            # Try to surface OpenAI's actual error.message instead of the
+            # bare HTTPError, so the user sees e.g.
+            #   "Your organization must be verified to use the model
+            #    gpt-image-2. Please go to: ..."
+            # rather than just "400 Client Error: Bad Request for url: ...".
+            err_msg = f"HTTP {r.status_code}"
+            try:
+                err_json = r.json()
+                err_obj = err_json.get("error") if isinstance(err_json, dict) else None
+                if isinstance(err_obj, dict) and err_obj.get("message"):
+                    err_msg = err_obj["message"]
+                elif isinstance(err_json, dict) and err_json.get("message"):
+                    err_msg = err_json["message"]
+            except Exception:
+                err_msg = f"HTTP {r.status_code}: {r.text[:300]}"
+            logger.error(f"[OpenAI] images/generations failed: {r.status_code} — {err_msg}")
+            raise RuntimeError(f"OpenAI image API error: {err_msg}")
 
         data = r.json()
         return self._cache_result(data, body["output_format"])
