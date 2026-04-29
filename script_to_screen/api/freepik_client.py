@@ -26,6 +26,45 @@ VIDEO_ENDPOINTS: dict[str, tuple[str, str]] = {
     "wan-v2-6-1080p":     ("/ai/image-to-video/wan-v2-6-1080p",        "/ai/image-to-video/wan-v2-6-1080p"),
 }
 
+# Per-model whitelist of accepted ``duration`` values (seconds). Verified
+# live: Seedance Pro 1080p returns ``400 Validation error`` for any value
+# outside {5, 10} — which is why the pipeline's auto-estimated 3/7/12
+# mostly failed while a 5 (s0_sh3) succeeded. The kling and minimax/wan
+# entries follow the same docs constraints.
+VIDEO_DURATIONS: dict[str, tuple[int, ...]] = {
+    "kling-v3-omni":      (5, 10),
+    "kling-v2-5-pro":     (5, 10),
+    "kling-v2-6-pro":     (5, 10),
+    "kling-o1-pro":       (5, 10),
+    "seedance-pro-1080p": (5, 10),
+    "minimax-hailuo-2-3": (6, 10),
+    "wan-v2-6-1080p":     (5,),
+}
+
+
+def _snap_duration(model: str, duration: int) -> int:
+    """Snap a requested duration to the nearest model-supported value.
+
+    The pipeline's ``_estimate_duration`` produces continuous integers
+    based on dialogue word count / shot type, but every Freepik video
+    model accepts only a small whitelist (e.g. Seedance Pro = {5, 10}).
+    Sending an off-list duration returns ``400 Validation error`` with
+    no useful detail. Snap before send so the user gets a usable video
+    instead of a cryptic 400.
+    """
+    allowed = VIDEO_DURATIONS.get(model, (5, 10))
+    if duration in allowed:
+        return duration
+    # Pick the closest allowed value; ties resolve to the longer (richer
+    # motion is usually better than a hard cut at 5s).
+    snapped = min(allowed, key=lambda v: (abs(v - duration), -v))
+    if snapped != duration:
+        logger.info(
+            f"[Freepik] {model} requires duration ∈ {allowed}; "
+            f"snapping {duration} → {snapped}."
+        )
+    return snapped
+
 # Mystic engine options
 MYSTIC_ENGINES = {"automatic", "magnific_sparkle", "magnific_illusio", "magnific_sharpy"}
 MYSTIC_RESOLUTIONS = {"1k", "2k", "4k"}
@@ -313,6 +352,11 @@ class FreepikClient:
         if model not in VIDEO_ENDPOINTS:
             logger.warning(f"Unknown video model '{model}', falling back to kling-v3-omni")
             model = "kling-v3-omni"
+
+        # Snap duration to a model-supported value. Without this, the
+        # pipeline's auto-estimated 3/7/12 returns ``400 Validation
+        # error`` from Seedance / Kling whose APIs only accept (5, 10).
+        duration = _snap_duration(model, duration)
 
         payload: dict = {
             "prompt": prompt,
