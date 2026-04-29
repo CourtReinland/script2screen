@@ -2864,15 +2864,28 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '        video_cfg_scale=' .. tostring(config.videoCfgScale or 0.5) .. ',\n'
         .. '        video_negative_prompt="' .. safeNegative .. '",\n'
         .. '    )\n'
-        .. '    # Build image_paths from generated images dir\n'
+        .. '    # Build image_paths from generated images dir.\n'
+        .. '    # Match every image extension a provider might emit:\n'
+        .. '    #   - Freepik / Grok: .png\n'
+        .. '    #   - OpenAI: .png / .jpeg / .webp depending on output_format\n'
+        .. '    #   - Gemini / Imagen: .png / .jpeg / .webp depending on response mimeType\n'
+        .. '    # Earlier this only globbed *.png and *.jpg, so Gemini\'s\n'
+        .. '    # .jpeg saves were silently skipped and video gen got an\n'
+        .. '    # empty image_paths -> "No matching images found".\n'
         .. '    image_dir = "' .. safeOutput .. '/images"\n'
         .. '    image_paths = {}\n'
-        .. '    for f in sorted(glob.glob(os.path.join(image_dir, "*.png")) + glob.glob(os.path.join(image_dir, "*.jpg"))):\n'
+        .. '    image_files = []\n'
+        .. '    for ext in ("png", "jpg", "jpeg", "webp"):\n'
+        .. '        image_files.extend(glob.glob(os.path.join(image_dir, f"*.{ext}")))\n'
+        .. '    # Sort by mtime so the newest file per shot wins (a regen\n'
+        .. '    # produces a new uid suffix; alphabetical order would be\n'
+        .. '    # unpredictable).\n'
+        .. '    for f in sorted(image_files, key=lambda p: os.path.getmtime(p)):\n'
         .. '        basename = os.path.splitext(os.path.basename(f))[0]\n'
         .. '        m = re.match(r"(s\\d+_sh\\d+)", basename)\n'
         .. '        if m:\n'
         .. '            key = m.group(1)\n'
-        .. '            image_paths[key] = f  # latest file per shot wins\n'
+        .. '            image_paths[key] = f  # newest mtime wins\n'
         .. '    custom_prompts = json.loads(\'' .. overridesJson("video"):gsub("'", "\\'") .. '\')\n'
         .. '    results = generate_videos_for_screenplay(\n'
         .. '        screenplay, provider, image_paths,\n'
@@ -3570,6 +3583,7 @@ function win.On.AssembleBtn.Clicked(ev)
     collectFiles(imageDir, "*.png", imageFiles)
     collectFiles(imageDir, "*.jpg", imageFiles)
     collectFiles(imageDir, "*.jpeg", imageFiles)
+    collectFiles(imageDir, "*.webp", imageFiles)
 
     -- Collect ALL original videos first, then overlay with lip-synced versions
     local origVideoFiles = {}
