@@ -358,21 +358,48 @@ class FreepikClient:
         # error`` from Seedance / Kling whose APIs only accept (5, 10).
         duration = _snap_duration(model, duration)
 
-        payload: dict = {
-            "prompt": prompt,
-            "duration": duration,
-            "cfg_scale": cfg_scale,
+        # Per-model payload schema. Seedance Pro / MiniMax / Wan use the
+        # newer Freepik schema where:
+        #   - start frame field is "image" (not "image_url")
+        #   - duration is a string ("5" / "10")
+        #   - cfg_scale isn't a recognized field
+        # Verified live: sending image_url to Seedance silently runs
+        # text-to-video mode (no start-frame conditioning), producing a
+        # video that bears no resemblance to the source image. The
+        # legacy Kling endpoints we use still accept image_url + int
+        # duration + cfg_scale.
+        new_schema_models = {
+            "seedance-pro-1080p", "minimax-hailuo-2-3", "wan-v2-6-1080p",
         }
+        is_new_schema = model in new_schema_models
+
+        if is_new_schema:
+            payload = {
+                "prompt": prompt,
+                "duration": str(duration),
+            }
+        else:
+            payload = {
+                "prompt": prompt,
+                "duration": duration,
+                "cfg_scale": cfg_scale,
+            }
 
         if start_image_path:
-            # Most Freepik video endpoints accept "image_url" with a data URI for local files.
             b64 = image_to_base64(start_image_path)
             ext = start_image_path.rsplit(".", 1)[-1].lower()
-            mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "image/png")
-            payload["image_url"] = f"data:{mime};base64,{b64}"
-            logger.info(f"[Freepik video] start frame: {start_image_path}")
+            mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                    "webp": "image/webp"}.get(ext, "image/png")
+            data_uri = f"data:{mime};base64,{b64}"
+            field = "image" if is_new_schema else "image_url"
+            payload[field] = data_uri
+            logger.info(
+                f"[Freepik video] {model} start frame: "
+                f"{start_image_path} (field={field})"
+            )
         elif start_image_url:
-            payload["image_url"] = start_image_url
+            field = "image" if is_new_schema else "image_url"
+            payload[field] = start_image_url
         else:
             logger.info("[Freepik video] no start image, text-to-video mode")
 
