@@ -1,5 +1,6 @@
 """Freepik API client for image generation, video generation, and lip-sync."""
 
+import json
 import logging
 import time
 from typing import Optional
@@ -62,7 +63,14 @@ class FreepikClient:
             "Accept": "application/json",
         })
         self.image_limiter = RateLimiter(calls_per_minute=10)
-        self.video_limiter = RateLimiter(calls_per_minute=5)
+        # Freepik enforces a tight per-minute rate on the heavier video
+        # endpoints (seedance-pro-1080p, kling pro variants). Empirically,
+        # 5/min still trips 429s in rapid back-to-back submission, so we
+        # space requests at ~30s. Polling completes in 1–3 min per video
+        # anyway, so this rarely adds wall-clock time when the API is
+        # actually generating; it just prevents the rate-limit cascade
+        # we hit when several tasks fail in quick succession.
+        self.video_limiter = RateLimiter(calls_per_minute=2)
 
     def test_connection(self) -> bool:
         """Test if the API key is valid."""
@@ -415,7 +423,9 @@ class FreepikClient:
     # ── Internal Helpers ─────────────────────────────────────────────
 
     def _post(self, url: str, payload: dict) -> dict:
-        """POST with retry on rate limit."""
+        """POST with retry on rate limit. Surfaces response body on 4xx so
+        ``400 Bad Request`` errors actually tell us what was wrong (Freepik
+        returns ``{"message": "..."}`` or a validation-error payload)."""
         for attempt in range(3):
             resp = self.session.post(url, json=payload, timeout=60)
             if resp.status_code == 429:
@@ -423,10 +433,31 @@ class FreepikClient:
                 logger.warning(f"Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # Pull the actual error message so the user sees what's wrong
+                # instead of the bare "400 Client Error" requests.HTTPError gives.
+                try:
+                    body = resp.json()
+                    msg = (body.get("message") if isinstance(body, dict) else None) \
+                        or (body.get("error") if isinstance(body, dict) else None) \
+                        or json.dumps(body)[:300]
+                except Exception:
+                    msg = (resp.text or "")[:300]
+                logger.error(f"Freepik {resp.status_code} on {url}: {msg}")
+                raise requests.HTTPError(
+                    f"{resp.status_code} {resp.reason} for {url}: {msg}",
+                    response=resp,
+                )
             return resp.json()
-        resp.raise_for_status()
-        return resp.json()
+        # Fallthrough: 429 on every attempt — surface the rate-limit message.
+        try:
+            msg = resp.json().get("message", resp.text[:200])
+        except Exception:
+            msg = resp.text[:200]
+        raise requests.HTTPError(
+            f"{resp.status_code} after retries for {url}: {msg}",
+            response=resp,
+        )
 
     def _get(self, url: str) -> dict:
         """GET with retry on rate limit."""
