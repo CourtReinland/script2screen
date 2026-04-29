@@ -63,14 +63,19 @@ class FreepikClient:
             "Accept": "application/json",
         })
         self.image_limiter = RateLimiter(calls_per_minute=10)
-        # Freepik enforces a tight per-minute rate on the heavier video
-        # endpoints (seedance-pro-1080p, kling pro variants). Empirically,
-        # 5/min still trips 429s in rapid back-to-back submission, so we
-        # space requests at ~30s. Polling completes in 1–3 min per video
-        # anyway, so this rarely adds wall-clock time when the API is
-        # actually generating; it just prevents the rate-limit cascade
-        # we hit when several tasks fail in quick succession.
-        self.video_limiter = RateLimiter(calls_per_minute=2)
+        # Freepik's Seedance Pro 1080p (and the kling pro variants)
+        # enforces a hard "rate limit per minute for this service" that
+        # rejects the second submission within ~60s of the first — even
+        # if the first submission was the only one in the past minute.
+        # Verified live: shot 0 → 200, shot 1 (1.4s later) → 429,
+        # shot 2 (12s later) → 429.
+        # 1/min (60s spacing) is the empirical floor that keeps every
+        # submission accepted. Each generation polls for 1–3 minutes
+        # anyway, so this rarely extends wall-clock time when the API
+        # is actually doing work — it just prevents the cascade where
+        # one rejection triggers retries that further saturate the
+        # quota.
+        self.video_limiter = RateLimiter(calls_per_minute=1)
 
     def test_connection(self) -> bool:
         """Test if the API key is valid."""
@@ -425,13 +430,26 @@ class FreepikClient:
     def _post(self, url: str, payload: dict) -> dict:
         """POST with retry on rate limit. Surfaces response body on 4xx so
         ``400 Bad Request`` errors actually tell us what was wrong (Freepik
-        returns ``{"message": "..."}`` or a validation-error payload)."""
+        returns ``{"message": "..."}`` or a validation-error payload).
+
+        Freepik's per-minute rate response is a 429 with body
+        ``"You've reached the rate limit per minute for this service..."``
+        and the cooldown is ~60s — short exponential backoffs (2/4/8s)
+        used to be useless because they always returned mid-window, so
+        the loop now sleeps a flat 60s on each rate-limit response.
+        """
         for attempt in range(3):
             resp = self.session.post(url, json=payload, timeout=60)
             if resp.status_code == 429:
-                wait = 2 ** (attempt + 1)
-                logger.warning(f"Rate limited, waiting {wait}s...")
-                time.sleep(wait)
+                # Flat 60s wait — the per-minute window doesn't reset for
+                # ~60s regardless of how short an exponential backoff
+                # we'd compute, and short waits just rotate us through
+                # the same 429 response.
+                logger.warning(
+                    f"Rate limited (429), waiting 60s before retry "
+                    f"(attempt {attempt + 1}/3)..."
+                )
+                time.sleep(60)
                 continue
             if resp.status_code >= 400:
                 # Pull the actual error message so the user sees what's wrong
