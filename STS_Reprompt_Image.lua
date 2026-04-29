@@ -1,5 +1,16 @@
--- STS_Reprompt_Image.lua — Regenerate an image with an edited prompt
+-- STS_Reprompt_Image.lua — Generate or regenerate an image
 -- Access: Workspace > Scripts > Edit > STS_Reprompt_Image
+--
+-- Two modes in one window:
+--   * Reprompt: a clip is selected in the media pool → prompt / style /
+--     char-refs auto-populate from the manifest, "Generate" produces a
+--     fresh take with whatever the user edits.
+--   * Fresh:   no clip selected (or the user clicked "Clear"). The form
+--     starts empty; "Generate" produces a brand-new image that imports
+--     into the project bin alongside any existing ones.
+-- The Generate button is the same in both cases — it just dispatches
+-- the current form state. The Clear button below it wipes the form so
+-- the user can leave reprompt mode without having to hand-edit fields.
 
 local ui = fu.UIManager
 local disp = bmd.UIDispatcher(ui)
@@ -91,11 +102,17 @@ end
 
 local win = disp:AddWindow({
     ID = "STS_RepromptImg",
-    WindowTitle = "ScriptToScreen — Reprompt Image",
-    Geometry = {200, 100, 650, 620},
+    WindowTitle = "ScriptToScreen — Generate / Reprompt Image",
+    Geometry = {200, 100, 650, 660},
 }, {
     ui:VGroup{
-        ui:Label{Text = "<h3>Reprompt Image</h3>", Alignment = {AlignHCenter = true}},
+        ui:Label{Text = "<h3>Generate / Reprompt Image</h3>", Alignment = {AlignHCenter = true}},
+        ui:Label{
+            Text = "Reprompt a selected clip, or generate a fresh image with no clip selected. "
+                .. "Click <b>Clear</b> below to wipe pre-filled fields and start fresh.",
+            StyleSheet = "color: #aaa; padding-bottom: 4px;",
+            WordWrap = true,
+        },
         ui:HGroup{
             ui:Label{Text = "Selected Clip:", Weight = 0.15},
             ui:Label{ID = "ClipName", Text = (clipInfo and clipInfo.status == "ok") and clipInfo.name or "(none — select a clip first)", Weight = 0.75},
@@ -123,10 +140,16 @@ local win = disp:AddWindow({
             ui:Label{Text = "Provider:", Weight = 0.15},
             ui:ComboBox{ID = "ProviderCombo", Weight = 0.85},
         },
+        ui:HGroup{
+            ID = "ModelRow",
+            ui:Label{Text = "Model:", Weight = 0.15},
+            ui:ComboBox{ID = "ModelCombo", Weight = 0.85},
+        },
         ui:VGap(5),
         ui:HGroup{
-            ui:Button{ID = "Generate", Text = "Generate", Weight = 0.5},
-            ui:Button{ID = "Cancel", Text = "Cancel", Weight = 0.5},
+            ui:Button{ID = "Generate", Text = "Generate", Weight = 0.4},
+            ui:Button{ID = "ClearForm", Text = "Clear / Start Fresh", Weight = 0.3},
+            ui:Button{ID = "Cancel", Text = "Cancel", Weight = 0.3},
         },
         ui:Label{ID = "StatusLabel", Text = "Ready", StyleSheet = "color: #888;"},
     },
@@ -153,12 +176,50 @@ end
 
 STS_populateProviderCombo(itm.ProviderCombo, STS_imageProviders, prefillProvider)
 
+-- Repopulate the Model combo to match the current provider. Hides the
+-- whole row when the provider has no per-model choice (Grok, ComfyUI).
+local function refreshModelCombo()
+    local pid = STS_getProviderIdFromCombo(itm.ProviderCombo, STS_imageProviders)
+    local choices = STS_getImageModelsForProvider(pid)
+    itm.ModelCombo:Clear()
+    if not choices then
+        itm.ModelRow:SetMinimumSize({0, 0})
+        itm.ModelRow.Hidden = true
+        return
+    end
+    itm.ModelRow.Hidden = false
+    local saved = (config[choices.configKey] or choices.default)
+    local idx = 0
+    for i, v in ipairs(choices.items) do
+        itm.ModelCombo:AddItem(v)
+        if v == saved then idx = i - 1 end
+    end
+    itm.ModelCombo.CurrentIndex = idx
+end
+refreshModelCombo()
+function win.On.ProviderCombo.CurrentIndexChanged(ev) refreshModelCombo() end
+
 -- ============================================================
 -- EVENT HANDLERS
 -- ============================================================
 
 function win.On.STS_RepromptImg.Close(ev) disp:ExitLoop() end
 function win.On.Cancel.Clicked(ev) disp:ExitLoop() end
+
+function win.On.ClearForm.Clicked(ev)
+    -- Wipe everything that could carry over from a reprompt, leaving the
+    -- form ready for a brand-new generation. Clip-selection state stays
+    -- visible so the user knows they're choosing to ignore it.
+    itm.PromptEdit.PlainText = ""
+    itm.StyleRefPath.Text = ""
+    itm.ShotKey.Text = ""
+    -- Drop every character ref row
+    while itm.CharRefTree:TopLevelItemCount() > 0 do
+        itm.CharRefTree:TakeTopLevelItem(0)
+    end
+    itm.StatusLabel.Text = "Form cleared — enter a fresh prompt and Generate."
+    itm.StatusLabel.StyleSheet = "color: #888;"
+end
 
 function win.On.RefreshClip.Clicked(ev)
     clipInfo = STS_getSelectedMediaPoolClip()
@@ -258,6 +319,20 @@ function win.On.Generate.Clicked(ev)
     local safeStyleRef = styleRef:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeServerUrl = (serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
+    -- Selected model from the per-provider Model combo, with sensible
+    -- per-provider routing into the right reprompt_image() kwarg.
+    local chosenModel = itm.ModelCombo.CurrentText or ""
+    local extraModelKwargs = ""
+    if providerId == "freepik" then
+        -- For freepik, the Model combo selects the API endpoint id;
+        -- the Mystic style stays at the saved config value.
+        extraModelKwargs = '        freepik_image_api="' .. chosenModel .. '",\n'
+    elseif providerId == "openai" then
+        extraModelKwargs = '        openai_model="' .. chosenModel .. '",\n'
+    elseif providerId == "gemini" then
+        extraModelKwargs = '        gemini_model="' .. chosenModel .. '",\n'
+    end
+
     local code = 'import traceback\n'
         .. 'try:\n'
         .. '    from script_to_screen.standalone import reprompt_image\n'
@@ -276,6 +351,7 @@ function win.On.Generate.Clicked(ev)
         .. '        creative_detailing=' .. tostring(config.detailing or 33) .. ',\n'
         .. '        server_url="' .. safeServerUrl .. '",\n'
         .. '        shot_key="' .. (shotKey or ""):gsub('"', '\\"') .. '",\n'
+        .. extraModelKwargs
         .. '    )\n'
         .. '    print(json.dumps(result))\n'
         .. 'except Exception as e:\n'

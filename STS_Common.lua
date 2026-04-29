@@ -254,13 +254,16 @@ end
 -- ============================================================
 
 STS_imageProviders = {
-    {id = "freepik",      name = "Freepik Mystic (Cloud)"},
+    {id = "freepik",      name = "Freepik (Cloud — Mystic, Flux, Seedream, etc.)"},
+    {id = "openai",       name = "OpenAI (Cloud — gpt-image, dall-e)"},
+    {id = "gemini",       name = "Google Gemini / Imagen (Cloud)"},
     {id = "grok",         name = "Grok Imagine (Cloud)"},
     {id = "comfyui_flux", name = "Flux Kontext (Local ComfyUI)"},
 }
 
 STS_videoProviders = {
-    {id = "freepik",      name = "Kling v3 Omni (Cloud)"},
+    {id = "freepik",      name = "Freepik (Cloud — Kling, Seedance, MiniMax, Wan)"},
+    {id = "openai",       name = "OpenAI Sora (Cloud)"},
     {id = "grok",         name = "Grok Imagine Video (Cloud)"},
     {id = "comfyui_ltx",  name = "LTX 2.3 (Local ComfyUI)"},
 }
@@ -275,6 +278,74 @@ STS_lipsyncProviders = {
     {id = "kling",        name = "Kling AI Lip Sync (Direct API)"},
     {id = "freepik",      name = "Kling via Freepik (Cloud)"},
 }
+
+-- ============================================================
+-- PER-PROVIDER MODEL LISTS
+-- ============================================================
+-- Single source of truth, mirrored from the matching constants in
+-- script_to_screen/api/*_client.py and script_to_screen/config.py.
+-- The standalone tools (Reprompt Image / Video, Generate Audio) read
+-- these to populate their Model dropdown when the user picks a
+-- provider, so a fresh-mode generation doesn't have to inherit the
+-- wizard's last-saved model choice.
+
+-- Freepik image-API endpoints. Each value is the FreepikImageProvider's
+-- ``freepik_image_api`` kwarg.
+STS_freepikImageApis = {
+    "mystic", "flux-dev", "flux-pro-v1-1",
+    "flux-2-pro", "flux-2-turbo", "flux-2-klein",
+    "flux-kontext-pro", "hyperflux",
+    "seedream-4", "seedream-v4-5", "z-image-turbo", "runway",
+}
+
+-- OpenAI image gen models. gpt-image-1 is default — gpt-image-2 needs
+-- org verification.
+STS_openaiImageModels = {"gpt-image-1", "gpt-image-2", "dall-e-3", "dall-e-2"}
+
+-- Google AI Studio image-gen models (Gemini multimodal + Imagen).
+-- Order matches gemini_image_client.SUPPORTED_MODELS (recommended-first).
+STS_geminiImageModels = {
+    "gemini-2.5-flash-image",
+    "gemini-3.1-flash-image-preview",
+    "gemini-3-pro-image-preview",
+    "imagen-4.0-generate-001",
+    "imagen-4.0-ultra-generate-001",
+    "imagen-4.0-fast-generate-001",
+}
+
+-- Freepik video-API endpoints, mirrors VIDEO_ENDPOINTS in freepik_client.
+STS_freepikVideoModels = {
+    "kling-v3-omni", "kling-v2-5-pro", "kling-v2-6-pro", "kling-o1-pro",
+    "seedance-pro-1080p", "minimax-hailuo-2-3", "wan-v2-6-1080p",
+}
+
+-- OpenAI Sora variants.
+STS_openaiVideoModels = {"sora-2", "sora-1"}
+
+-- Returns the list of model ids the standalone tool should show for a
+-- given (category, provider) combination, plus the config key the
+-- saved value lives under, plus a sensible default. Returns nil when
+-- the provider has no per-model choice (Grok, ComfyUI), so callers can
+-- hide the Model row entirely.
+function STS_getImageModelsForProvider(providerId)
+    if providerId == "freepik" then
+        return {items = STS_freepikImageApis, configKey = "freepikImageApi", default = "mystic"}
+    elseif providerId == "openai" then
+        return {items = STS_openaiImageModels, configKey = "openaiModel", default = "gpt-image-1"}
+    elseif providerId == "gemini" then
+        return {items = STS_geminiImageModels, configKey = "geminiModel", default = "gemini-2.5-flash-image"}
+    end
+    return nil
+end
+
+function STS_getVideoModelsForProvider(providerId)
+    if providerId == "freepik" then
+        return {items = STS_freepikVideoModels, configKey = "videoModel", default = "kling-v3-omni"}
+    elseif providerId == "openai" then
+        return {items = STS_openaiVideoModels, configKey = "openaiVideoModel", default = "sora-2"}
+    end
+    return nil
+end
 
 -- ============================================================
 -- RESOLVE HELPERS

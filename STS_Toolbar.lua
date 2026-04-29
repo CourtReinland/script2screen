@@ -17,10 +17,15 @@ local utilityDir = "/Library/Application Support/Blackmagic Design/DaVinci Resol
 -- UI — compact floating toolbar
 -- ============================================================
 
+-- Window height is set generously so all section labels + buttons fit
+-- without clipping the bottom row. The previous 420px height left
+-- "Script Reference" / Close cut off when section spacing accumulates
+-- across more rows. Sized to comfortably hold the current 8 buttons +
+-- 5 section labels + planned additions; the user can also resize.
 local win = disp:AddWindow({
     ID = "STS_Toolbar",
     WindowTitle = "STS Tools",
-    Geometry = {20, 100, 180, 420},
+    Geometry = {20, 100, 200, 600},
     WindowFlags = {Window = true, WindowStaysOnTopHint = true},
 }, {
     ui:VGroup{
@@ -31,9 +36,11 @@ local win = disp:AddWindow({
         ui:Label{Text = "Main", StyleSheet = "color: #888; padding-top: 6px;"},
         ui:Button{ID = "LaunchWizard", Text = "🎬 Full Wizard"},
 
-        ui:Label{Text = "Reprompt", StyleSheet = "color: #888; padding-top: 6px;"},
-        ui:Button{ID = "LaunchRepromptImage", Text = "🖼 Reprompt Image"},
-        ui:Button{ID = "LaunchRepromptVideo", Text = "🎥 Reprompt Video"},
+        -- Both buttons open dual-mode tools: reprompt the currently
+        -- selected clip, OR (after Clear) generate a fresh one.
+        ui:Label{Text = "Generate / Reprompt", StyleSheet = "color: #888; padding-top: 6px;"},
+        ui:Button{ID = "LaunchRepromptImage", Text = "🖼 Image"},
+        ui:Button{ID = "LaunchRepromptVideo", Text = "🎥 Video"},
 
         ui:Label{Text = "Generate", StyleSheet = "color: #888; padding-top: 6px;"},
         ui:Button{ID = "LaunchAudio", Text = "🔊 Generate Audio"},

@@ -58,8 +58,15 @@ def reprompt_image(
     creative_detailing: int = 33,
     server_url: str = "",
     shot_key: str = "",
+    **provider_kwargs,
 ) -> dict:
-    """Generate a new image from an edited prompt. Returns {status, file_path}."""
+    """Generate a new image from an edited prompt. Returns {status, file_path}.
+
+    ``provider_kwargs`` is forwarded verbatim to ``provider.generate_image``
+    so the standalone tools can pass the per-provider model selector
+    (``freepik_image_api``, ``openai_model``, ``gemini_model``) without
+    this function needing to know about each provider's flavors.
+    """
     try:
         provider = create_image_provider(
             provider_id, api_key=api_key, server_url=server_url, model=model
@@ -78,6 +85,8 @@ def reprompt_image(
             aspect_ratio=aspect_ratio,
             model=model,
             creative_detailing=creative_detailing,
+            character_refs=char_refs,
+            **provider_kwargs,
         )
 
         result = poll_until_complete(
@@ -132,8 +141,15 @@ def reprompt_video(
     server_url: str = "",
     shot_key: str = "",
     aspect_ratio: str = "16:9",
+    **provider_kwargs,
 ) -> dict:
-    """Generate a new video from an edited prompt. Returns {status, file_path}."""
+    """Generate a new video from an edited prompt. Returns {status, file_path}.
+
+    ``provider_kwargs`` is forwarded to ``provider.generate_video`` so the
+    standalone tool can pass ``video_model="seedance-pro-1080p"`` (or the
+    OpenAI Sora variant) without this function needing per-provider
+    awareness.
+    """
     try:
         provider = create_video_provider(
             provider_id, api_key=api_key, server_url=server_url
@@ -146,6 +162,7 @@ def reprompt_video(
             start_image_path=start_image_path or None,
             duration=duration,
             aspect_ratio=aspect_ratio,
+            **provider_kwargs,
         )
 
         result = poll_until_complete(

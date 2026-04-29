@@ -158,11 +158,17 @@ end
 
 local win = disp:AddWindow({
     ID = "STS_RepromptVid",
-    WindowTitle = "ScriptToScreen — Reprompt Video",
-    Geometry = {200, 100, 650, 600},
+    WindowTitle = "ScriptToScreen — Generate / Reprompt Video",
+    Geometry = {200, 100, 650, 640},
 }, {
     ui:VGroup{
-        ui:Label{Text = "<h3>Reprompt Video</h3>", Alignment = {AlignHCenter = true}},
+        ui:Label{Text = "<h3>Generate / Reprompt Video</h3>", Alignment = {AlignHCenter = true}},
+        ui:Label{
+            Text = "Reprompt a selected clip, or generate fresh — pick a start image, "
+                .. "type a prompt, click Generate. <b>Clear</b> wipes pre-filled fields.",
+            StyleSheet = "color: #aaa; padding-bottom: 4px;",
+            WordWrap = true,
+        },
         ui:HGroup{
             ui:Label{Text = "Selected Clip:", Weight = 0.15},
             ui:Label{ID = "ClipName", Text = (clipInfo and clipInfo.status == "ok") and clipInfo.name or "(none — select a video clip or place playhead)", Weight = 0.75},
@@ -188,10 +194,16 @@ local win = disp:AddWindow({
             ui:Label{Text = "Provider:", Weight = 0.15},
             ui:ComboBox{ID = "ProviderCombo", Weight = 0.85},
         },
+        ui:HGroup{
+            ID = "ModelRow",
+            ui:Label{Text = "Model:", Weight = 0.15},
+            ui:ComboBox{ID = "ModelCombo", Weight = 0.85},
+        },
         ui:VGap(5),
         ui:HGroup{
-            ui:Button{ID = "Generate", Text = "Generate Video", Weight = 0.5},
-            ui:Button{ID = "Cancel", Text = "Cancel", Weight = 0.5},
+            ui:Button{ID = "Generate", Text = "Generate Video", Weight = 0.4},
+            ui:Button{ID = "ClearForm", Text = "Clear / Start Fresh", Weight = 0.3},
+            ui:Button{ID = "Cancel", Text = "Cancel", Weight = 0.3},
         },
         ui:Label{ID = "StatusLabel", Text = "Ready", StyleSheet = "color: #888;"},
     },
@@ -200,11 +212,45 @@ local win = disp:AddWindow({
 local itm = win:GetItems()
 STS_populateProviderCombo(itm.ProviderCombo, STS_videoProviders, prefillProvider)
 
+-- Repopulate the Model combo to match the current provider; hide the
+-- Model row entirely when the provider has no per-model choice.
+local function refreshModelCombo()
+    local pid = STS_getProviderIdFromCombo(itm.ProviderCombo, STS_videoProviders)
+    local choices = STS_getVideoModelsForProvider(pid)
+    itm.ModelCombo:Clear()
+    if not choices then
+        itm.ModelRow.Hidden = true
+        return
+    end
+    itm.ModelRow.Hidden = false
+    local saved = (config[choices.configKey] or choices.default)
+    local idx = 0
+    for i, v in ipairs(choices.items) do
+        itm.ModelCombo:AddItem(v)
+        if v == saved then idx = i - 1 end
+    end
+    itm.ModelCombo.CurrentIndex = idx
+end
+refreshModelCombo()
+function win.On.ProviderCombo.CurrentIndexChanged(ev) refreshModelCombo() end
+
 -- ============================================================
 -- EVENT HANDLERS
 -- ============================================================
 
 function win.On.STS_RepromptVid.Close(ev) disp:ExitLoop() end
+
+function win.On.ClearForm.Clicked(ev)
+    -- Wipe everything that could carry over from a reprompt so the user
+    -- can produce a brand-new video with a different start frame and
+    -- prompt, leaving any selected clip alone.
+    itm.PromptEdit.PlainText = ""
+    itm.StartImagePath.Text = ""
+    itm.ShotKey.Text = ""
+    itm.Duration.Value = 5
+    itm.StatusLabel.Text = "Form cleared — pick a start image, enter a prompt, and Generate."
+    itm.StatusLabel.StyleSheet = "color: #888;"
+end
 function win.On.Cancel.Clicked(ev) disp:ExitLoop() end
 
 function win.On.RefreshClip.Clicked(ev)
@@ -257,6 +303,18 @@ function win.On.Generate.Clicked(ev)
     local safeStartImg = itm.StartImagePath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeServerUrl = (serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
+    -- Selected model from the per-provider Model combo. For Freepik
+    -- this is the endpoint id (kling-v3-omni / seedance-pro-1080p /
+    -- etc); for OpenAI it picks the Sora variant. Other providers
+    -- ignore via **kwargs in standalone.reprompt_video.
+    local chosenModel = itm.ModelCombo.CurrentText or ""
+    local extraModelKwargs = ""
+    if providerId == "freepik" and chosenModel ~= "" then
+        extraModelKwargs = '        video_model="' .. chosenModel .. '",\n'
+    elseif providerId == "openai" and chosenModel ~= "" then
+        extraModelKwargs = '        openai_video_model="' .. chosenModel .. '",\n'
+    end
+
     local code = 'import traceback\n'
         .. 'try:\n'
         .. '    from script_to_screen.standalone import reprompt_video\n'
@@ -271,6 +329,7 @@ function win.On.Generate.Clicked(ev)
         .. '        duration=' .. tostring(itm.Duration.Value) .. ',\n'
         .. '        server_url="' .. safeServerUrl .. '",\n'
         .. '        shot_key="' .. (itm.ShotKey.Text or ""):gsub('"', '\\"') .. '",\n'
+        .. extraModelKwargs
         .. '    )\n'
         .. '    print(json.dumps(result))\n'
         .. 'except Exception as e:\n'
