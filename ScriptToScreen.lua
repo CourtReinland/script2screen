@@ -396,10 +396,21 @@ local config = {
         grok       = { apiKey = "" },
         openai     = { apiKey = "" },
         gemini     = { apiKey = "" },
+        claude     = { apiKey = "" },                   -- Anthropic API key (text only)
         comfyui    = { serverUrl = "http://127.0.0.1:8188" },
         voicebox   = { serverUrl = "http://127.0.0.1:17493" },
         kling      = { apiKey = "" },
     },
+    -- Screenplay parser selection (Step 2). "heuristic" runs the
+    -- existing pdf/fountain regex parsers; the LLM options send the
+    -- raw script text to the chosen TextProvider with a structured
+    -- JSON contract.
+    screenplayParser = "heuristic",   -- heuristic | claude | grok | openai
+    -- Step 4 toggle: route every shot's image+motion prompt through
+    -- the LLM prompt refiner before generation. Uses the same provider
+    -- as screenplayParser when set to an LLM, otherwise asks the user
+    -- to pick one. Off by default (uses the deterministic builders).
+    refinePromptsWithLLM = false,
     -- Legacy (kept for backward compat)
     freepikKey = "",
     elevenlabsKey = "",
@@ -522,12 +533,21 @@ do
                 if saved.providers.gemini then
                     config.providers.gemini.apiKey = saved.providers.gemini.apiKey or ""
                 end
-                if saved.providers.kling then
-                    config.providers.kling.apiKey = saved.providers.kling.apiKey or ""
+                if saved.providers.claude then
+                    config.providers.claude.apiKey = saved.providers.claude.apiKey or ""
                 end
-                if saved.providers.voicebox then
-                    config.providers.voicebox.serverUrl = saved.providers.voicebox.serverUrl or "http://127.0.0.1:17493"
-                end
+            end
+            if saved.screenplayParser then
+                config.screenplayParser = saved.screenplayParser
+            end
+            if saved.refinePromptsWithLLM ~= nil then
+                config.refinePromptsWithLLM = saved.refinePromptsWithLLM and true or false
+            end
+            if saved.providers and saved.providers.kling then
+                config.providers.kling.apiKey = saved.providers.kling.apiKey or ""
+            end
+            if saved.providers and saved.providers.voicebox then
+                config.providers.voicebox.serverUrl = saved.providers.voicebox.serverUrl or "http://127.0.0.1:17493"
             end
             -- Migrate legacy keys
             if saved.freepikKey and saved.freepikKey ~= "" and config.providers.freepik.apiKey == "" then
@@ -802,6 +822,23 @@ local win = disp:AddWindow({
                     ui:Button{ID = "BrowseScript", Text = "Browse", Weight = 0.15},
                     ui:Button{ID = "ParseScript", Text = "Parse", Weight = 0.15},
                 },
+                ui:HGroup{
+                    ui:Label{Text = "Parser:", Weight = 0.12},
+                    ui:ComboBox{ID = "ParserCombo", Weight = 0.28},
+                    ui:Label{Text = "API Key:", Weight = 0.1, ID = "ParserKeyLabel"},
+                    ui:LineEdit{
+                        ID = "ParserApiKey",
+                        PlaceholderText = "(reuses Step 1 key; only for LLM parsers)",
+                        EchoMode = "Password",
+                        Weight = 0.5,
+                    },
+                },
+                ui:Label{
+                    Text = "Heuristic = built-in regex (no API call). LLM options send the full script text "
+                        .. "to the chosen chat model with a JSON-extraction contract.",
+                    StyleSheet = "color: #888; padding-bottom: 4px;",
+                    WordWrap = true,
+                },
                 ui:Label{ID = "ParseStatus", Text = "", StyleSheet = "padding: 5px;"},
                 ui:Label{Text = "<b>Screenplay Summary</b>", StyleSheet = "padding-top: 8px;"},
                 ui:TextEdit{ID = "ScriptSummary", ReadOnly = true, PlaceholderText = "Parse a screenplay to see summary...", MinimumSize = {400, 180}},
@@ -870,6 +907,25 @@ local win = disp:AddWindow({
                     ui:Label{Text = "Creative Detail:", Weight = 0.2},
                     ui:Slider{ID = "DetailSlider", Minimum = 0, Maximum = 100, Value = 33, Weight = 0.6},
                     ui:Label{ID = "DetailValue", Text = "33", Weight = 0.2},
+                },
+
+                -- LLM-driven prompt refinement: split each shot into a
+                -- still-image prompt (no camera motion) and a separate
+                -- video-motion prompt. Uses whichever LLM the user
+                -- picked as the Step-2 parser, falling back to the
+                -- first LLM they have a key for.
+                ui:HGroup{
+                    ui:CheckBox{
+                        ID = "RefinePromptsCheck",
+                        Text = "Refine prompts with LLM (split still vs motion)",
+                        Weight = 0.7,
+                    },
+                    ui:Label{
+                        Text = "Uses parser provider when LLM, else Claude/OpenAI/Grok with a key.",
+                        StyleSheet = "color: #888;",
+                        WordWrap = true,
+                        Weight = 0.3,
+                    },
                 },
 
                 -- Freepik Mystic per-model options (shown only when API == mystic)
@@ -1437,6 +1493,56 @@ setComboToValue(itm.OpenAISizeCombo, openaiSizes, config.openaiSize)
 setComboToValue(itm.OpenAIFormatCombo, openaiFormats, config.openaiOutputFormat)
 setComboToValue(itm.OpenAIBgCombo, openaiBackgrounds, config.openaiBackground)
 
+-- Parser selector (Step 2): "heuristic" runs the existing pdf/fountain
+-- regex parsers; the LLM options route raw script text through the
+-- chosen TextProvider with the JSON-extraction contract defined in
+-- script_to_screen/parsing/llm_parser.py.
+local parserOptions = {
+    {id = "heuristic", label = "Heuristic (built-in)"},
+    {id = "claude",    label = "Claude (Anthropic)"},
+    {id = "grok",      label = "Grok (xAI)"},
+    {id = "openai",    label = "OpenAI"},
+}
+local function parserIdToLabel(id)
+    for _, p in ipairs(parserOptions) do
+        if p.id == id then return p.label end
+    end
+    return parserOptions[1].label
+end
+local function parserLabelToId(lbl)
+    for _, p in ipairs(parserOptions) do
+        if p.label == lbl then return p.id end
+    end
+    return "heuristic"
+end
+for _, p in ipairs(parserOptions) do itm.ParserCombo:AddItem(p.label) end
+setComboToValue(
+    itm.ParserCombo,
+    (function() local out = {}; for _, p in ipairs(parserOptions) do out[#out+1] = p.label end; return out end)(),
+    parserIdToLabel(config.screenplayParser or "heuristic")
+)
+
+-- Refine-prompts checkbox state from saved config.
+itm.RefinePromptsCheck.Checked = (config.refinePromptsWithLLM == true)
+
+-- When the parser selection changes, refresh the API-key field to show
+-- the saved key for that LLM (masked). Heuristic mode hides the field.
+local function refreshParserKeyField()
+    local pid = parserLabelToId(itm.ParserCombo.CurrentText or "")
+    if pid == "heuristic" then
+        itm.ParserApiKey.Text = ""
+        itm.ParserApiKey.Enabled = false
+        itm.ParserApiKey.PlaceholderText = "(no API key needed for heuristic parser)"
+    else
+        itm.ParserApiKey.Enabled = true
+        itm.ParserApiKey.PlaceholderText = pid .. " API key"
+        local saved = config.providers[pid] and config.providers[pid].apiKey or ""
+        itm.ParserApiKey.Text = saved
+    end
+end
+refreshParserKeyField()
+function win.On.ParserCombo.CurrentIndexChanged(ev) refreshParserKeyField() end
+
 -- Video model selector (Step 8)
 local videoModels = {
     -- Freepik-hosted (require Freepik provider)
@@ -1646,8 +1752,31 @@ local function onNext()
         saveConfig()
     end
 
+    -- Save Step 2 (Script) on Next: parser selection + last-script path
+    -- + the LLM API key the user typed (when the chosen parser is an LLM).
+    if currentStep == 2 then
+        local pid = parserLabelToId(itm.ParserCombo.CurrentText or "")
+        config.screenplayParser = pid
+        if pid ~= "heuristic" then
+            local typed = itm.ParserApiKey.Text or ""
+            if typed ~= "" then
+                config.providers[pid] = config.providers[pid] or {}
+                config.providers[pid].apiKey = typed
+            end
+        end
+        if itm.ScriptPath.Text and itm.ScriptPath.Text ~= "" then
+            config.lastScriptPath = itm.ScriptPath.Text
+        end
+        saveConfig()
+    end
+
     -- Save Step 4 (Style + generation settings) on Next
     if currentStep == 4 then
+        -- Refine-prompts toggle: when ticked, parseScript() / Step 5 will
+        -- run prompt_refiner.refine_screenplay_prompts before image gen,
+        -- and the resulting per-shot prompts are used instead of the
+        -- deterministic build_image_prompt() / build_motion_prompt().
+        config.refinePromptsWithLLM = (itm.RefinePromptsCheck.Checked == true)
         config.model = itm.ModelCombo.CurrentText or "realism"
         config.aspectRatio = itm.AspectCombo.CurrentText or "widescreen_16_9"
         config.detailing = itm.DetailSlider.Value or 33
@@ -1948,24 +2077,85 @@ function win.On.ParseScript.Clicked(ev)
         return
     end
 
-    itm.ParseStatus.Text = "Parsing screenplay..."
+    -- Pick the parser the user selected (saved on Step-2 Next, but the
+    -- Parse button can be hit before Next, so read live from the combo).
+    local chosenParser = parserLabelToId(itm.ParserCombo.CurrentText or "")
+    config.screenplayParser = chosenParser
+
+    -- For LLM parsers we need a TextProvider api key. Prefer the value
+    -- in the on-page Key field (so the user can type it without
+    -- pressing Next first); fall back to the saved provider config.
+    local llmApiKey = ""
+    if chosenParser ~= "heuristic" then
+        llmApiKey = (itm.ParserApiKey.Text or "")
+        if llmApiKey == "" then
+            llmApiKey = config.providers[chosenParser]
+                and config.providers[chosenParser].apiKey or ""
+        end
+        -- Persist a freshly-typed key so refinement can reuse it.
+        if llmApiKey ~= "" then
+            config.providers[chosenParser] = config.providers[chosenParser] or {}
+            config.providers[chosenParser].apiKey = llmApiKey
+        end
+    end
+    if chosenParser ~= "heuristic" and llmApiKey == "" then
+        itm.ParseStatus.Text = "Type a " .. chosenParser
+            .. " API key in the field above (or pick Heuristic)."
+        itm.ParseStatus.StyleSheet = "color: orange;"
+        return
+    end
+
+    itm.ParseStatus.Text = "Parsing screenplay (" .. chosenParser .. ")..."
     itm.ParseStatus.StyleSheet = "color: #888;"
 
     -- Escape backslashes and quotes in path for Python string literal
     local safePath = path:gsub("\\", "\\\\"):gsub('"', '\\"')
 
+    -- Stash the LLM key in a tempfile so it doesn't appear in the
+    -- Resolve Console / Lua source if the script is logged on error.
+    local llmKeyFile = ""
+    if chosenParser ~= "heuristic" then
+        llmKeyFile = os.tmpname()
+        local kf = io.open(llmKeyFile, "w")
+        if kf then kf:write(llmApiKey); kf:close() end
+    end
+    local safeKeyFile = llmKeyFile:gsub("\\", "\\\\"):gsub('"', '\\"')
+
     local code = 'import json, traceback\n'
         .. 'try:\n'
         .. '    script_path = "' .. safePath .. '"\n'
-        .. '    if script_path.lower().endswith(".pdf"):\n'
-        .. '        from script_to_screen.parsing.pdf_parser import parse_pdf\n'
-        .. '        screenplay = parse_pdf(script_path)\n'
-        .. '    elif script_path.lower().endswith(".fountain"):\n'
-        .. '        from script_to_screen.parsing.fountain_parser import parse_fountain\n'
-        .. '        screenplay = parse_fountain(script_path)\n'
+        .. '    parser_id = "' .. chosenParser .. '"\n'
+        .. '    if parser_id == "heuristic":\n'
+        .. '        if script_path.lower().endswith(".pdf"):\n'
+        .. '            from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+        .. '            screenplay = parse_pdf(script_path)\n'
+        .. '        elif script_path.lower().endswith(".fountain"):\n'
+        .. '            from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+        .. '            screenplay = parse_fountain(script_path)\n'
+        .. '        else:\n'
+        .. '            print(json.dumps({"error": "Unsupported file format. Use .pdf or .fountain"}))\n'
+        .. '            exit()\n'
         .. '    else:\n'
-        .. '        print(json.dumps({"error": "Unsupported file format. Use .pdf or .fountain"}))\n'
-        .. '        exit()\n'
+        .. '        # LLM-driven parsing: extract raw text, hand to chosen TextProvider.\n'
+        .. '        from script_to_screen.parsing.llm_parser import parse_with_llm\n'
+        .. '        from script_to_screen.api.registry import create_text_provider\n'
+        .. '        if script_path.lower().endswith(".pdf"):\n'
+        .. '            import pdfplumber\n'
+        .. '            pages = []\n'
+        .. '            with pdfplumber.open(script_path) as pdf:\n'
+        .. '                for p in pdf.pages:\n'
+        .. '                    pages.append(p.extract_text() or "")\n'
+        .. '            raw_text = "\\n".join(pages)\n'
+        .. '        else:\n'
+        .. '            with open(script_path, "r", encoding="utf-8", errors="replace") as f:\n'
+        .. '                raw_text = f.read()\n'
+        .. '        api_key = open("' .. safeKeyFile .. '").read().strip()\n'
+        .. '        provider = create_text_provider(parser_id, api_key=api_key)\n'
+        .. '        import os\n'
+        .. '        title_guess = os.path.splitext(os.path.basename(script_path))[0]\n'
+        .. '        screenplay = parse_with_llm(raw_text, provider, title=title_guess)\n'
+        .. '        if not screenplay.scenes:\n'
+        .. '            raise RuntimeError("LLM parser produced 0 scenes — try a different parser or check the script content.")\n'
         .. '    data = {\n'
         .. '        "title": screenplay.title,\n'
         .. '        "scene_count": screenplay.scene_count,\n'
@@ -2013,6 +2203,7 @@ function win.On.ParseScript.Clicked(ev)
         .. '    print(json.dumps({"error": str(e), "trace": traceback.format_exc()}))\n'
 
     local result = runPython(code)
+    if llmKeyFile ~= "" then os.remove(llmKeyFile) end
 
     if result and result ~= "" then
         -- Find the JSON line (skip any warnings/import messages)
@@ -2262,6 +2453,39 @@ function win.On.GenAllImages.Clicked(ev)
     local kf = io.open(keyfile, "w")
     if kf then kf:write(imgApiKey); kf:close() end
 
+    -- Optional LLM key file for prompt refinement (Step 4 toggle).
+    -- Resolved here so the embedded Python doesn't leak the key into
+    -- /tmp/sts_last_script.py.
+    local refineKeyfile = ""
+    local refineProvider = ""
+    if config.refinePromptsWithLLM then
+        -- Pick the LLM provider: prefer the one selected as parser
+        -- (already validated to have a key during Step 2 if non-heuristic);
+        -- otherwise fall back to whichever LLM has a key configured.
+        refineProvider = (config.screenplayParser and config.screenplayParser ~= "heuristic")
+            and config.screenplayParser or ""
+        if refineProvider == "" then
+            for _, pid in ipairs({"claude", "openai", "grok"}) do
+                if config.providers[pid] and (config.providers[pid].apiKey or "") ~= "" then
+                    refineProvider = pid
+                    break
+                end
+            end
+        end
+        if refineProvider ~= "" then
+            local refineKey = config.providers[refineProvider]
+                and config.providers[refineProvider].apiKey or ""
+            if refineKey ~= "" then
+                refineKeyfile = os.tmpname()
+                local rk = io.open(refineKeyfile, "w")
+                if rk then rk:write(refineKey); rk:close() end
+            else
+                refineProvider = ""
+            end
+        end
+    end
+    local safeRefineKeyfile = refineKeyfile:gsub("\\", "\\\\"):gsub('"', '\\"')
+
     local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
     -- Build character images JSON
@@ -2325,6 +2549,23 @@ function win.On.GenAllImages.Clicked(ev)
         .. '    )\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
         .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
+        -- Optional: LLM prompt refinement before image gen. The cache
+        -- file under output_dir/refined_prompts.json is shared with the
+        -- video-gen handler so motion prompts stay consistent.
+        .. (refineProvider ~= "" and (
+            '    try:\n'
+            .. '        from script_to_screen.pipeline.prompt_refiner import get_refined_prompts\n'
+            .. '        from script_to_screen.api.registry import create_text_provider\n'
+            .. '        _refine_key = open("' .. safeRefineKeyfile .. '").read().strip()\n'
+            .. '        _refine_prov = create_text_provider("' .. refineProvider .. '", api_key=_refine_key)\n'
+            .. '        _refined = get_refined_prompts(screenplay, "' .. safeOutput .. '", text_provider=_refine_prov)\n'
+            .. '        for _sk, _p in (_refined.get("image_prompts") or {}).items():\n'
+            .. '            if _sk not in custom_prompts:\n'
+            .. '                custom_prompts[_sk] = _p\n'
+            .. '        print(f"[Refine] applied {len(_refined.get(\\"image_prompts\\", {}))} refined image prompts")\n'
+            .. '    except Exception as _re:\n'
+            .. '        print(f"[Refine] failed: {_re} — falling back to deterministic prompts")\n'
+        ) or "")
         .. '    results = generate_images_for_screenplay(\n'
         .. '        screenplay, provider, "' .. safeOutput .. '",\n'
         .. '        style_reference_path=style_path,\n'
@@ -2340,6 +2581,7 @@ function win.On.GenAllImages.Clicked(ev)
 
     local result = runPython(code)
     os.remove(keyfile)
+    if refineKeyfile ~= "" then os.remove(refineKeyfile) end
 
     local jsonStr = extractLastJsonLine(result)
     if jsonStr then
@@ -2838,6 +3080,37 @@ function win.On.GenAllVideos.Clicked(ev)
     local kf = io.open(keyfile, "w")
     if kf then kf:write(vidApiKey); kf:close() end
 
+    -- Optional LLM keyfile for prompt refinement (mirror of GenAllImages).
+    -- Reuses the cache image-gen wrote, so motion prompts come from the
+    -- same refinement pass. Only pays for a fresh LLM call if the cache
+    -- file isn't present or shot keys drifted.
+    local vidRefineKeyfile = ""
+    local vidRefineProvider = ""
+    if config.refinePromptsWithLLM then
+        vidRefineProvider = (config.screenplayParser and config.screenplayParser ~= "heuristic")
+            and config.screenplayParser or ""
+        if vidRefineProvider == "" then
+            for _, pid in ipairs({"claude", "openai", "grok"}) do
+                if config.providers[pid] and (config.providers[pid].apiKey or "") ~= "" then
+                    vidRefineProvider = pid
+                    break
+                end
+            end
+        end
+        if vidRefineProvider ~= "" then
+            local rk2 = config.providers[vidRefineProvider]
+                and config.providers[vidRefineProvider].apiKey or ""
+            if rk2 ~= "" then
+                vidRefineKeyfile = os.tmpname()
+                local rkf2 = io.open(vidRefineKeyfile, "w")
+                if rkf2 then rkf2:write(rk2); rkf2:close() end
+            else
+                vidRefineProvider = ""
+            end
+        end
+    end
+    local safeVidRefineKeyfile = vidRefineKeyfile:gsub("\\", "\\\\"):gsub('"', '\\"')
+
     local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeNegative = (config.videoNegativePrompt or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
@@ -2887,6 +3160,23 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '            key = m.group(1)\n'
         .. '            image_paths[key] = f  # newest mtime wins\n'
         .. '    custom_prompts = json.loads(\'' .. overridesJson("video"):gsub("'", "\\'") .. '\')\n'
+        -- Optional refinement: prefer the cache image-gen wrote so motion
+        -- prompts match the still prompts; falls back to a fresh refine
+        -- if the cache is missing or stale.
+        .. (vidRefineProvider ~= "" and (
+            '    try:\n'
+            .. '        from script_to_screen.pipeline.prompt_refiner import get_refined_prompts\n'
+            .. '        from script_to_screen.api.registry import create_text_provider\n'
+            .. '        _vid_key = open("' .. safeVidRefineKeyfile .. '").read().strip()\n'
+            .. '        _vid_prov = create_text_provider("' .. vidRefineProvider .. '", api_key=_vid_key)\n'
+            .. '        _refined = get_refined_prompts(screenplay, "' .. safeOutput .. '", text_provider=_vid_prov)\n'
+            .. '        for _sk, _p in (_refined.get("motion_prompts") or {}).items():\n'
+            .. '            if _sk not in custom_prompts:\n'
+            .. '                custom_prompts[_sk] = _p\n'
+            .. '        print(f"[Refine] applied {len(_refined.get(\\"motion_prompts\\", {}))} refined motion prompts")\n'
+            .. '    except Exception as _re:\n'
+            .. '        print(f"[Refine] failed: {_re} — falling back to deterministic motion prompts")\n'
+        ) or "")
         .. '    results = generate_videos_for_screenplay(\n'
         .. '        screenplay, provider, image_paths,\n'
         .. '        "' .. safeOutput .. '",\n'
@@ -2901,6 +3191,7 @@ function win.On.GenAllVideos.Clicked(ev)
 
     local result = runPython(code)
     os.remove(keyfile)
+    if vidRefineKeyfile ~= "" then os.remove(vidRefineKeyfile) end
 
     local jsonStr = extractLastJsonLine(result)
     if jsonStr then

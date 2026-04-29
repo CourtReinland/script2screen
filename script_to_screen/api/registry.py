@@ -331,7 +331,7 @@ def _register_builtins():
     except ImportError:
         logger.debug("MLX-Audio provider not available (missing mlx_audio_provider module)")
 
-    # Grok text/chat LLM (for shot expansion)
+    # Grok text/chat LLM (for shot expansion + LLM screenplay parsing)
     try:
         from .grok_text_provider import GrokTextProvider
 
@@ -342,12 +342,48 @@ def _register_builtins():
                 category="text",
                 requires_api_key=True,
                 requires_server_url=False,
-                description="Grok chat LLM for shot expansion and other text generation",
+                description="Grok chat LLM for shot expansion, screenplay parsing, prompt refinement",
             ),
             lambda api_key="", **kw: GrokTextProvider(api_key, **kw),
         )
     except ImportError:
         logger.debug("Grok text provider not available")
+
+    # OpenAI chat (text)
+    try:
+        from .openai_text_provider import OpenAITextProvider
+
+        register_text_provider(
+            ProviderInfo(
+                id="openai",
+                name="OpenAI (gpt-4o, gpt-4-turbo, ...)",
+                category="text",
+                requires_api_key=True,
+                requires_server_url=False,
+                description="OpenAI chat completions for screenplay parsing & prompt refinement",
+            ),
+            lambda api_key="", **kw: OpenAITextProvider(api_key, **kw),
+        )
+    except ImportError:
+        logger.debug("OpenAI text provider not available")
+
+    # Anthropic Claude (text)
+    try:
+        from .claude_text_provider import ClaudeTextProvider
+
+        register_text_provider(
+            ProviderInfo(
+                id="claude",
+                name="Anthropic Claude (Sonnet/Opus)",
+                category="text",
+                requires_api_key=True,
+                requires_server_url=False,
+                description="Claude messages API for screenplay parsing & prompt refinement",
+            ),
+            lambda api_key="", **kw: ClaudeTextProvider(api_key, **kw),
+        )
+    except ImportError:
+        logger.debug("Claude text provider not available")
 
     # Kling AI direct API (lip sync with JWT auth)
     try:
