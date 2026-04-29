@@ -68,6 +68,10 @@ class GenerationDefaults:
     openai_size: str = "auto"                      # 1024x1024 | 1536x1024 | 1024x1536 | auto
     openai_output_format: str = "png"              # png | jpeg | webp
     openai_background: str = "auto"                # transparent | opaque | auto
+    # Google Gemini / Imagen image gen options. Default is the fast/cheap
+    # gemini-2.5-flash-image (Nano Banana). See SUPPORTED_MODELS in
+    # gemini_image_client for the full list (Gemini 3 previews + Imagen 4).
+    gemini_model: str = "gemini-2.5-flash-image"
     # Video generation
     video_model: str = "kling-v3-omni"             # see VIDEO_ENDPOINTS in freepik_client
     video_cfg_scale: float = 0.5                   # 0.0-1.0

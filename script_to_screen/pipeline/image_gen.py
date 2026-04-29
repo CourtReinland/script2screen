@@ -174,15 +174,21 @@ def generate_images_for_screenplay(
     errors: list[str] = []
 
     for shot_key, shot, scene, shot_idx in all_shots:
+        # Always compute per-shot character references so we can hand
+        # them to providers that accept them as image inputs (Gemini /
+        # Nano Banana). Done unconditionally — when custom_prompts is
+        # used, build_prompt() is skipped but the refs themselves are
+        # still relevant for conditioning the image generator.
+        char_refs: dict[str, str] = {}
+        for char_name in shot.characters_present:
+            char = screenplay.characters.get(char_name)
+            if char and char.reference_image_path:
+                char_refs[char_name] = char.reference_image_path
+
         if custom_prompts and shot_key in custom_prompts:
             prompt = custom_prompts[shot_key]
         else:
             base_prompt = build_image_prompt(shot, scene, screenplay, shot_idx=shot_idx)
-            char_refs = {}
-            for char_name in shot.characters_present:
-                char = screenplay.characters.get(char_name)
-                if char and char.reference_image_path:
-                    char_refs[char_name] = char.reference_image_path
             prompt = provider.build_prompt(base_prompt, char_refs)
 
         logger.info(f"[{shot_key}] Prompt: {prompt[:120]}...")
@@ -191,6 +197,10 @@ def generate_images_for_screenplay(
             task_id = provider.generate_image(
                 prompt=prompt,
                 style_reference_path=style_reference_path,
+                # Per-shot character references — providers that support
+                # multimodal conditioning (Gemini) inline these as image
+                # parts; others ignore the kwarg.
+                character_refs=char_refs,
                 style_adherence=defaults.creative_detailing,
                 aspect_ratio=defaults.aspect_ratio,
                 model=defaults.freepik_model,
@@ -203,6 +213,8 @@ def generate_images_for_screenplay(
                 freepik_image_api=defaults.freepik_image_api,
                 # OpenAI per-model options (ignored by other providers)
                 openai_model=defaults.openai_model,
+                # Gemini / Imagen model selector (ignored by other providers)
+                gemini_model=defaults.gemini_model,
                 openai_quality=defaults.openai_quality,
                 openai_size=defaults.openai_size,
                 openai_output_format=defaults.openai_output_format,
@@ -284,6 +296,7 @@ def regenerate_single_image(
     output_dir: str,
     style_reference_path: Optional[str] = None,
     defaults: Optional[GenerationDefaults] = None,
+    character_refs: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """Regenerate a single image by shot key."""
     if defaults is None:
@@ -295,6 +308,7 @@ def regenerate_single_image(
         task_id = provider.generate_image(
             prompt=prompt,
             style_reference_path=style_reference_path,
+            character_refs=character_refs or {},
             style_adherence=defaults.creative_detailing,
             aspect_ratio=defaults.aspect_ratio,
             model=defaults.freepik_model,
@@ -305,6 +319,7 @@ def regenerate_single_image(
             freepik_structure_strength=defaults.freepik_structure_strength,
             freepik_image_api=defaults.freepik_image_api,
             openai_model=defaults.openai_model,
+            gemini_model=defaults.gemini_model,
             openai_quality=defaults.openai_quality,
             openai_size=defaults.openai_size,
             openai_output_format=defaults.openai_output_format,

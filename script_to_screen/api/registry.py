@@ -213,23 +213,52 @@ def _register_builtins():
     except ImportError:
         logger.debug("Voicebox provider not available (missing voicebox_provider module)")
 
-    # OpenAI gpt-image-2 (cloud image generation)
+    # OpenAI image generation (gpt-image-* / dall-e-* family)
     try:
         from .openai_image_provider import OpenAIImageProvider
 
         register_image_provider(
             ProviderInfo(
                 id="openai",
-                name="GPT Image 2 (OpenAI)",
+                name="OpenAI (Cloud — gpt-image, dall-e)",
                 category="image",
                 requires_api_key=True,
                 requires_server_url=False,
-                description="Cloud image generation via OpenAI gpt-image-2",
+                description=(
+                    "Cloud image generation via OpenAI. Supports gpt-image-1, "
+                    "gpt-image-1-mini, gpt-image-1.5, gpt-image-2 "
+                    "(requires org verification), dall-e-3, dall-e-2 — "
+                    "choose in Step 4."
+                ),
             ),
             lambda api_key="", **kw: OpenAIImageProvider(api_key, **kw),
         )
     except ImportError:
         logger.debug("OpenAI image provider not available")
+
+    # Google Gemini / Imagen (cloud image generation)
+    try:
+        from .gemini_image_provider import GeminiImageProvider
+
+        register_image_provider(
+            ProviderInfo(
+                id="gemini",
+                name="Google Gemini / Imagen (Cloud)",
+                category="image",
+                requires_api_key=True,
+                requires_server_url=False,
+                description=(
+                    "Cloud image generation via Google AI Studio. Supports "
+                    "Gemini 2.5/3 image models (gemini-2.5-flash-image aka "
+                    "Nano Banana, gemini-3.x-*-image-preview) and Imagen 4 "
+                    "variants (imagen-4.0-generate/ultra/fast) — choose in "
+                    "Step 4."
+                ),
+            ),
+            lambda api_key="", **kw: GeminiImageProvider(api_key, **kw),
+        )
+    except ImportError:
+        logger.debug("Gemini image provider not available")
 
     # OpenAI Sora (cloud video generation)
     try:

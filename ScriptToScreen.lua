@@ -395,6 +395,7 @@ local config = {
         elevenlabs = { apiKey = "" },
         grok       = { apiKey = "" },
         openai     = { apiKey = "" },
+        gemini     = { apiKey = "" },
         comfyui    = { serverUrl = "http://127.0.0.1:8188" },
         voicebox   = { serverUrl = "http://127.0.0.1:17493" },
         kling      = { apiKey = "" },
@@ -434,7 +435,8 @@ local characterImages = {} -- characterName -> imagePath
 local characterVoices = {} -- characterName -> voiceId
 local generatedImages = {} -- shotKey (s{N}_sh{M}) -> imagePath
 local failedImages = {}    -- shotKey (s{N}_sh{M}) -> error message
-local generatedVideos = {} -- shotKey -> videoPath
+local generatedVideos = {} -- shotKey (s{N}_sh{M}) -> videoPath
+local failedVideos = {}    -- shotKey (s{N}_sh{M}) -> error message
 local generatedAudio = {}  -- dialogueKey -> audioPath
 local lipSyncedVideos = {} -- shotKey -> videoPath
 
@@ -516,6 +518,9 @@ do
                 end
                 if saved.providers.openai then
                     config.providers.openai.apiKey = saved.providers.openai.apiKey or ""
+                end
+                if saved.providers.gemini then
+                    config.providers.gemini.apiKey = saved.providers.gemini.apiKey or ""
                 end
                 if saved.providers.kling then
                     config.providers.kling.apiKey = saved.providers.kling.apiKey or ""
@@ -891,6 +896,13 @@ local win = disp:AddWindow({
                     ui:Label{Text = "Model (OpenAI):", Weight = 0.2},
                     ui:ComboBox{ID = "OpenAIModelCombo", Weight = 0.8},
                 },
+
+                -- Google Gemini / Imagen model selector (shown only when imageProvider == "gemini")
+                ui:HGroup{
+                    ID = "GeminiModelRow",
+                    ui:Label{Text = "Model (Gemini):", Weight = 0.2},
+                    ui:ComboBox{ID = "GeminiModelCombo", Weight = 0.8},
+                },
                 ui:HGroup{
                     ID = "OpenAIQualityRow",
                     ui:Label{Text = "Quality (OpenAI):", Weight = 0.2},
@@ -1172,7 +1184,8 @@ local itm = win:GetItems()
 local imageProviders = {
     {id = "freepik",      name = "Freepik Mystic (Cloud)"},
     {id = "grok",         name = "Grok Imagine (Cloud)"},
-    {id = "openai",       name = "GPT Image 2 (OpenAI)"},
+    {id = "openai",       name = "OpenAI (Cloud — gpt-image, dall-e)"},
+    {id = "gemini",       name = "Google Gemini / Imagen (Cloud)"},
     {id = "comfyui_flux", name = "Flux Kontext (Local ComfyUI)"},
 }
 local videoProviders = {
@@ -1216,7 +1229,7 @@ end
 -- Helper: update field visibility based on provider type
 local function updateImageProviderFields()
     local id = getImageProviderId(itm.ImageProviderCombo.CurrentIndex)
-    local isCloud = (id == "freepik" or id == "grok" or id == "openai")
+    local isCloud = (id == "freepik" or id == "grok" or id == "openai" or id == "gemini")
     itm.ImageApiKey.Enabled = isCloud
     itm.ImageServerUrl.Enabled = not isCloud
     if id == "freepik" then
@@ -1228,6 +1241,9 @@ local function updateImageProviderFields()
     elseif id == "openai" then
         itm.ImageApiKey.PlaceholderText = "OpenAI API key (sk-...)..."
         itm.ImageApiKey.Text = config.providers.openai and config.providers.openai.apiKey or ""
+    elseif id == "gemini" then
+        itm.ImageApiKey.PlaceholderText = "Google AI Studio API key (AIza...)..."
+        itm.ImageApiKey.Text = config.providers.gemini and config.providers.gemini.apiKey or ""
     else
         itm.ImageApiKey.PlaceholderText = "(not needed)"
         itm.ImageApiKey.Text = ""
@@ -1366,6 +1382,18 @@ local openaiModels = {
 }
 for _, v in ipairs(openaiModels) do itm.OpenAIModelCombo:AddItem(v) end
 
+-- Google Gemini / Imagen image models. Order = recommended-first.
+-- Mirrors SUPPORTED_MODELS in script_to_screen/api/gemini_image_client.py
+local geminiModels = {
+    "gemini-2.5-flash-image",            -- "Nano Banana" — fast/cheap default
+    "gemini-3.1-flash-image-preview",    -- newer general-purpose flash
+    "gemini-3-pro-image-preview",        -- professional, higher-quality
+    "imagen-4.0-generate-001",           -- Imagen 4 standard
+    "imagen-4.0-ultra-generate-001",     -- Imagen 4 ultra
+    "imagen-4.0-fast-generate-001",      -- Imagen 4 fast
+}
+for _, v in ipairs(geminiModels) do itm.GeminiModelCombo:AddItem(v) end
+
 local openaiQualities = {"auto", "low", "medium", "high"}
 for _, v in ipairs(openaiQualities) do itm.OpenAIQualityCombo:AddItem(v) end
 local openaiSizes = {"auto", "1024x1024", "1536x1024", "1024x1536"}
@@ -1403,6 +1431,7 @@ do
     setComboToValue(itm.FreepikApiCombo, names, freepikApiIdToName(savedApi))
 end
 setComboToValue(itm.OpenAIModelCombo, openaiModels, config.openaiModel or "gpt-image-1")
+setComboToValue(itm.GeminiModelCombo, geminiModels, config.geminiModel or "gemini-2.5-flash-image")
 setComboToValue(itm.OpenAIQualityCombo, openaiQualities, config.openaiQuality)
 setComboToValue(itm.OpenAISizeCombo, openaiSizes, config.openaiSize)
 setComboToValue(itm.OpenAIFormatCombo, openaiFormats, config.openaiOutputFormat)
@@ -1444,6 +1473,7 @@ local function refreshProviderControls()
     local pid = config.imageProvider or "freepik"
     local isFreepik = (pid == "freepik")
     local isOpenAI  = (pid == "openai")
+    local isGemini  = (pid == "gemini")
 
     -- Which Freepik API is currently selected (only meaningful when isFreepik).
     local apiId = "mystic"
@@ -1470,6 +1500,8 @@ local function refreshProviderControls()
     setRow(itm.OpenAISizeRow,        isOpenAI)
     setRow(itm.OpenAIFormatRow,      isOpenAI)
     setRow(itm.OpenAIBgRow,          isOpenAI)
+    -- Gemini / Imagen model selector
+    setRow(itm.GeminiModelRow,       isGemini)
 end
 
 -- Re-run visibility logic when the user picks a different Freepik API.
@@ -1509,6 +1541,12 @@ itm.FPSCombo:AddItem("30")
 -- real definition appears below (Lua locals aren't visible to code that
 -- parsed earlier in the same chunk).
 local populateReviewTree
+-- Forward-declare populateImageTree / populateVideoTree so the GenAllImages,
+-- GenAllVideos, and RetryFailedImages handlers (defined far above the actual
+-- implementations) can call them without ending up as global lookups that
+-- silently no-op. Lua locals don't propagate backward in the same chunk.
+local populateImageTree
+local populateVideoTree
 
 -- Same problem for overridesJson: referenced by GenAllImages /
 -- RetryFailedImages / GenAllVideos handlers (defined at ~L2200/2450/2743)
@@ -1522,6 +1560,16 @@ local function showStep(step)
     currentStep = step
     itm.PageStack.CurrentIndex = step - 1
     itm.StepLabel.Text = string.format("<b>%d/%d: %s</b>", step, #STEPS, STEPS[step])
+    -- Re-apply provider-specific row visibility on entering Style (step 4).
+    -- The page has many conditionally-hidden rows (Freepik Mystic, OpenAI,
+    -- Gemini). On first navigation the layout occasionally retains stale
+    -- visibility from init, leaving phantom rows that overlap the Browse
+    -- button at the top of the page and intercept its click. Re-running
+    -- refreshProviderControls() right before the page is shown forces a
+    -- clean layout pass.
+    if step == 4 then
+        pcall(refreshProviderControls)
+    end
     -- When entering Review Images (step 5) or Review Videos (step 7),
     -- ensure the review tree is populated from the current screenplay.
     if step == 5 and screenplayData then
@@ -1562,6 +1610,8 @@ local function onNext()
             config.providers.grok.apiKey = itm.ImageApiKey.Text
         elseif imgId == "openai" then
             config.providers.openai.apiKey = itm.ImageApiKey.Text
+        elseif imgId == "gemini" then
+            config.providers.gemini.apiKey = itm.ImageApiKey.Text
         end
         local vidId = config.videoProvider
         if vidId == "freepik" then
@@ -1613,6 +1663,8 @@ local function onNext()
         config.openaiSize = itm.OpenAISizeCombo.CurrentText or "auto"
         config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or "png"
         config.openaiBackground = itm.OpenAIBgCombo.CurrentText or "auto"
+        -- Gemini / Imagen model selector
+        config.geminiModel = itm.GeminiModelCombo.CurrentText or "gemini-2.5-flash-image"
         saveConfig()
     end
 
@@ -1788,7 +1840,7 @@ function win.On.TestImageProvider.Clicked(ev)
     local key = (itm.ImageApiKey.Text or ""):match("^%s*(.-)%s*$")
     local url = itm.ImageServerUrl.Text or ""
     -- For cloud providers, require API key
-    if (pid == "freepik" or pid == "grok" or pid == "openai") and key == "" then
+    if (pid == "freepik" or pid == "grok" or pid == "openai" or pid == "gemini") and key == "" then
         itm.ImageProviderStatus.Text = "No key"
         itm.ImageProviderStatus.StyleSheet = "color: orange;"
         return
@@ -1800,6 +1852,8 @@ function win.On.TestImageProvider.Clicked(ev)
             config.providers.grok.apiKey = key
         elseif pid == "openai" then
             config.providers.openai.apiKey = key
+        elseif pid == "gemini" then
+            config.providers.gemini.apiKey = key
         end
         config.providers.comfyui.serverUrl = url
         config.imageProvider = pid
@@ -2156,6 +2210,11 @@ function win.On.GenAllImages.Clicked(ev)
         itm.ImageProgress.StyleSheet = "color: red;"
         return
     end
+    if imgPid == "gemini" and (config.providers.gemini and config.providers.gemini.apiKey or "") == "" then
+        itm.ImageProgress.Text = "Set Google AI Studio (Gemini) API key first (Step 1)!"
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
     if not screenplayData then
         itm.ImageProgress.Text = "Parse a screenplay first (Step 2)!"
         itm.ImageProgress.StyleSheet = "color: red;"
@@ -2180,6 +2239,8 @@ function win.On.GenAllImages.Clicked(ev)
         imgApiKey = config.providers.grok.apiKey or ""
     elseif imgPid == "openai" then
         imgApiKey = config.providers.openai and config.providers.openai.apiKey or ""
+    elseif imgPid == "gemini" then
+        imgApiKey = config.providers.gemini and config.providers.gemini.apiKey or ""
     end
 
     -- Persist the latest Step 4 picks into config before Python reads them
@@ -2256,6 +2317,7 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
         .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
         .. '        openai_model="' .. (config.openaiModel or "gpt-image-1") .. '",\n'
+        .. '        gemini_model="' .. (config.geminiModel or "gemini-2.5-flash-image") .. '",\n'
         .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
         .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
         .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
@@ -2437,6 +2499,8 @@ function win.On.RetryFailedImages.Clicked(ev)
         imgApiKey = config.providers.grok.apiKey or ""
     elseif imgPid == "openai" then
         imgApiKey = config.providers.openai and config.providers.openai.apiKey or ""
+    elseif imgPid == "gemini" then
+        imgApiKey = config.providers.gemini and config.providers.gemini.apiKey or ""
     end
     local keyfile = os.tmpname()
     local kf = io.open(keyfile, "w")
@@ -2508,6 +2572,7 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '        freepik_resolution="' .. (config.freepikResolution or "2k") .. '",\n'
         .. '        freepik_structure_strength=' .. tostring(config.freepikStructureStrength or 50) .. ',\n'
         .. '        openai_model="' .. (config.openaiModel or "gpt-image-1") .. '",\n'
+        .. '        gemini_model="' .. (config.geminiModel or "gemini-2.5-flash-image") .. '",\n'
         .. '        openai_quality="' .. (config.openaiQuality or "auto") .. '",\n'
         .. '        openai_size="' .. (config.openaiSize or "auto") .. '",\n'
         .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
@@ -2832,6 +2897,24 @@ function win.On.GenAllVideos.Clicked(ev)
             local count = data.count or 0
             local errs = data.errors or {}
             local imgCount = data.image_count or 0
+
+            -- Parse error strings ("s{N}_sh{M}: <msg>") into failedVideos so
+            -- the tree can show per-shot Failed badges and the user knows
+            -- exactly which shots to regenerate. Mirrors the image-gen flow.
+            failedVideos = {}
+            for _, errStr in ipairs(errs) do
+                local sk, msg = tostring(errStr):match("^(s%d+_sh%d+):%s*(.*)$")
+                if sk then
+                    failedVideos[sk] = (msg and msg ~= "") and msg or "Unknown error"
+                end
+            end
+            -- Any previously-failed shot that now has a successful path is cleared
+            for sk, _ in pairs(generatedVideos) do
+                failedVideos[sk] = nil
+            end
+            -- Refresh the tree so users can see Failed/Done badges
+            pcall(populateVideoTree)
+
             if count > 0 then
                 -- Import generated videos to episode/scene bins
                 local importMsg = ""
@@ -3954,7 +4037,7 @@ end
 -- POPULATE TREES WHEN ENTERING STEPS
 -- ============================================================
 
-local function populateImageTree()
+populateImageTree = function()
     if not screenplayData or not screenplayData.scenes then return end
 
     local hdr = itm.ImageTree:NewItem()
@@ -4011,7 +4094,7 @@ local function populateImageTree()
     end)
 end
 
-local function populateVideoTree()
+populateVideoTree = function()
     if not screenplayData or not screenplayData.scenes then return end
 
     local hdr = itm.VideoTree:NewItem()
@@ -4038,9 +4121,20 @@ local function populateVideoTree()
             local desc = shot.description or ""
             if #desc > 70 then desc = desc:sub(1, 67) .. "..." end
             item.Text[2] = desc
-            local key = tostring(scene.index) .. "_" .. tostring(shot.index or 0)
+            -- Python-format shot key (matches generatedVideos / failedVideos /
+            -- generatedImages keys, e.g. "s3_sh0"). The previous "3_0" format
+            -- never matched anything so every row was stuck on "Pending" / "No".
+            local key = "s" .. tostring(scene.index) .. "_sh" .. tostring(shot.index or 0)
             item.Text[3] = generatedImages[key] and "Yes" or "No"
-            item.Text[4] = generatedVideos[key] and "Done" or "Pending"
+            if generatedVideos[key] then
+                item.Text[4] = "Done"
+                pcall(function() item.TextColor[4] = {R = 0.4, G = 0.85, B = 0.4, A = 1} end)
+            elseif failedVideos[key] then
+                item.Text[4] = "Failed"
+                pcall(function() item.TextColor[4] = {R = 0.95, G = 0.35, B = 0.35, A = 1} end)
+            else
+                item.Text[4] = "Pending"
+            end
             itm.VideoTree:AddTopLevelItem(item)
         end
     end
