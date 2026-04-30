@@ -207,9 +207,22 @@ def regenerate_single_video(
     video_model: str = "kling-v3-omni",
     cfg_scale: float = 0.5,
     negative_prompt: str = "",
+    **provider_kwargs,
 ) -> Optional[str]:
-    """Regenerate a single video by shot key."""
+    """Regenerate a single video by shot key.
+
+    ``provider_kwargs`` is forwarded to ``provider.generate_video`` so
+    callers can override the model on a per-shot retry (e.g. the
+    wizard's Step-8 re-roll combo passes ``video_model="seedance-pro-1080p"``
+    or ``openai_video_model="sora-2"`` to retry a stuck shot on a
+    different model without changing the project's defaults).
+    """
     videos_dir = ensure_dir(os.path.join(output_dir, "videos"))
+
+    # Re-routed kwargs win over the positional defaults (an explicit
+    # video_model from the caller should override the kwarg default).
+    if "video_model" in provider_kwargs:
+        video_model = provider_kwargs.pop("video_model")
 
     try:
         task_id = provider.generate_video(
@@ -219,6 +232,7 @@ def regenerate_single_video(
             video_model=video_model,
             cfg_scale=cfg_scale,
             negative_prompt=negative_prompt,
+            **provider_kwargs,
         )
 
         result = poll_until_complete(

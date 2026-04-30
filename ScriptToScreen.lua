@@ -1035,6 +1035,17 @@ local win = disp:AddWindow({
                     ui:Button{ID = "RetryFailedImages", Text = "Retry Failed", Weight = 0.3, Enabled = false},
                     ui:Label{Text = "", Weight = 0.1},
                 },
+                -- Re-roll model picker: when a particular shot's prompt
+                -- isn't responding well to one model, the natural fix is
+                -- to retry on a different one. Provider + model dropdowns
+                -- here override the Step 1 / Step 4 selection JUST for
+                -- the next Regenerate Selected / Retry Failed click.
+                ui:HGroup{
+                    ui:Label{Text = "Re-roll provider:", Weight = 0.18},
+                    ui:ComboBox{ID = "RegenImageProvider", Weight = 0.32},
+                    ui:Label{Text = "Model:", Weight = 0.1},
+                    ui:ComboBox{ID = "RegenImageModel", Weight = 0.4},
+                },
                 ui:Label{ID = "ImageProgress", Text = "Ready"},
                 ui:VGap(0, 0.5),
                 ui:HGroup{
@@ -1106,6 +1117,15 @@ local win = disp:AddWindow({
                     ui:Button{ID = "GenAllVideos", Text = "Generate All Videos", Weight = 0.3},
                     ui:Button{ID = "RegenVideo", Text = "Regenerate Selected", Weight = 0.3},
                     ui:Label{Text = "", Weight = 0.4},
+                },
+                -- Re-roll model picker for video regen — same pattern as
+                -- the image-gen page. Selected model overrides the Step
+                -- 8 default JUST for the next Regenerate Selected click.
+                ui:HGroup{
+                    ui:Label{Text = "Re-roll provider:", Weight = 0.18},
+                    ui:ComboBox{ID = "RegenVideoProvider", Weight = 0.32},
+                    ui:Label{Text = "Model:", Weight = 0.1},
+                    ui:ComboBox{ID = "RegenVideoModel", Weight = 0.4},
                 },
                 ui:Label{ID = "VideoProgress", Text = "Ready"},
                 ui:VGap(0, 0.5),
@@ -1264,6 +1284,11 @@ for _, p in ipairs(imageProviders) do itm.ImageProviderCombo:AddItem(p.name) end
 for _, p in ipairs(videoProviders) do itm.VideoProviderCombo:AddItem(p.name) end
 for _, p in ipairs(voiceProviders) do itm.VoiceProviderCombo:AddItem(p.name) end
 for _, p in ipairs(lipsyncProviders) do itm.LipSyncProviderCombo:AddItem(p.name) end
+-- Re-roll combos on Step 6 / Step 8: same provider sets, populated up
+-- front. The Model combos populate dynamically when the user picks a
+-- provider (further down, after the model lists are defined).
+for _, p in ipairs(imageProviders) do itm.RegenImageProvider:AddItem(p.name) end
+for _, p in ipairs(videoProviders) do itm.RegenVideoProvider:AddItem(p.name) end
 
 -- Helper: get provider ID from combo index
 local function getImageProviderId(idx) return imageProviders[(idx or 0) + 1] and imageProviders[(idx or 0) + 1].id or "freepik" end
@@ -1893,6 +1918,101 @@ end
 
 function win.On.VoiceProviderCombo.CurrentIndexChanged(ev)
     updateVoiceProviderFields()
+end
+
+-- ============================================================
+-- STEP 6 / STEP 8: Re-roll provider/model combos
+-- ============================================================
+-- Map each (image|video) provider to its model list (the same lists
+-- defined on Step 4 / Step 8 already; these wrappers just centralize
+-- the lookup so the re-roll combos stay in sync without duplicating
+-- the lists).
+
+local function regenImageModelsForProvider(pid)
+    if pid == "freepik" then
+        return freepikImageApis,
+            "freepikImageApi",
+            (config.freepikImageApi or "mystic")
+    elseif pid == "openai" then
+        return openaiModels, "openaiModel", (config.openaiModel or "gpt-image-1")
+    elseif pid == "gemini" then
+        return geminiModels, "geminiModel", (config.geminiModel or "gemini-2.5-flash-image")
+    end
+    return nil
+end
+
+-- The wizard's main videoModels list mixes Freepik-hosted models
+-- (kling-*, seedance-*, minimax-*, wan-*) and OpenAI Sora variants.
+-- For the re-roll combos we filter by provider so the user only sees
+-- what each route actually accepts.
+local _openaiVideoModelIds = {"sora-2", "sora-2-pro"}
+
+local function regenVideoModelsForProvider(pid)
+    if pid == "freepik" then
+        local freepikOnly = {}
+        for _, m in ipairs(videoModels) do
+            local isOpenAI = false
+            for _, om in ipairs(_openaiVideoModelIds) do
+                if om == m then isOpenAI = true; break end
+            end
+            if not isOpenAI then table.insert(freepikOnly, m) end
+        end
+        return freepikOnly, "videoModel", (config.videoModel or "kling-v3-omni")
+    elseif pid == "openai" then
+        return _openaiVideoModelIds, "videoModel",
+            (config.videoModel and config.videoModel:match("^sora") and config.videoModel or "sora-2")
+    end
+    return nil
+end
+
+local function refreshRegenImageModelCombo()
+    local pid = getImageProviderId(itm.RegenImageProvider.CurrentIndex)
+    local items, _, default = regenImageModelsForProvider(pid)
+    itm.RegenImageModel:Clear()
+    if not items then
+        itm.RegenImageModel:AddItem("(provider has no model choice)")
+        itm.RegenImageModel.Enabled = false
+        return
+    end
+    itm.RegenImageModel.Enabled = true
+    local idx = 0
+    for i, v in ipairs(items) do
+        itm.RegenImageModel:AddItem(v)
+        if v == default then idx = i - 1 end
+    end
+    itm.RegenImageModel.CurrentIndex = idx
+end
+
+local function refreshRegenVideoModelCombo()
+    local pid = getVideoProviderId(itm.RegenVideoProvider.CurrentIndex)
+    local items, _, default = regenVideoModelsForProvider(pid)
+    itm.RegenVideoModel:Clear()
+    if not items then
+        itm.RegenVideoModel:AddItem("(provider has no model choice)")
+        itm.RegenVideoModel.Enabled = false
+        return
+    end
+    itm.RegenVideoModel.Enabled = true
+    local idx = 0
+    for i, v in ipairs(items) do
+        itm.RegenVideoModel:AddItem(v)
+        if v == default then idx = i - 1 end
+    end
+    itm.RegenVideoModel.CurrentIndex = idx
+end
+
+-- Default the re-roll provider combos to match the user's primary
+-- choice; users can switch on-the-fly when a particular shot fails.
+setComboToProvider(itm.RegenImageProvider, imageProviders, config.imageProvider)
+setComboToProvider(itm.RegenVideoProvider, videoProviders, config.videoProvider)
+refreshRegenImageModelCombo()
+refreshRegenVideoModelCombo()
+
+function win.On.RegenImageProvider.CurrentIndexChanged(ev)
+    refreshRegenImageModelCombo()
+end
+function win.On.RegenVideoProvider.CurrentIndexChanged(ev)
+    refreshRegenVideoModelCombo()
 end
 
 function win.On.LipSyncProviderCombo.CurrentIndexChanged(ev)
@@ -2841,7 +2961,8 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '                        char_refs[c] = ch.reference_image_path\n'
         .. '                prompt = provider.build_prompt(prompt, char_refs)\n'
         .. '                actual = regenerate_single_image(sk, prompt, provider, "' .. safeOutput .. '",\n'
-        .. '                    style_reference_path=style_path, defaults=defaults)\n'
+        .. '                    style_reference_path=style_path, defaults=defaults,\n'
+        .. '                    character_refs=char_refs)\n'
         .. '                if actual:\n'
         .. '                    paths[sk] = actual\n'
         .. '                    try:\n'
@@ -2959,6 +3080,410 @@ function win.On.RetryFailedImages.Clicked(ev)
     end
     itm.ImageProgress.Text = msg
 end
+
+-- ============================================================
+-- STEP 6: Regenerate Selected Image
+-- ============================================================
+-- Single-shot re-roll. Re-feeds the Step-3 character references and the
+-- Step-4 style reference automatically (the user-reported gap), and
+-- uses whichever provider+model the user picked in the re-roll combos
+-- — handy when one model keeps misinterpreting a particular prompt.
+
+function win.On.RegenImage.Clicked(ev)
+    local sel = itm.ImageTree:CurrentItem()
+    if not sel then
+        itm.ImageProgress.Text = "Select a shot row in the tree first."
+        itm.ImageProgress.StyleSheet = "color: orange;"
+        return
+    end
+    local sceneIdx = tonumber(sel.Text[0])
+    local shotIdx1 = tonumber(sel.Text[1])
+    if not sceneIdx or not shotIdx1 then
+        itm.ImageProgress.Text = "Could not read shot from row."
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
+    local shotKey = "s" .. tostring(sceneIdx) .. "_sh" .. tostring(shotIdx1 - 1)
+
+    -- Re-roll provider/model from the dedicated combos. Fall back to
+    -- the saved Step-1 / Step-4 selection so first-launch state is sane.
+    local rrProvId = getImageProviderId(itm.RegenImageProvider.CurrentIndex)
+    local rrModel = itm.RegenImageModel.CurrentText or ""
+    if not rrModel or rrModel == "" or rrModel:match("^%(") then
+        rrModel = ""
+    end
+
+    -- Resolve the API key for the re-roll provider.
+    local rrKey = ""
+    if rrProvId == "freepik" then
+        rrKey = config.providers.freepik.apiKey or ""
+    elseif rrProvId == "grok" then
+        rrKey = config.providers.grok.apiKey or ""
+    elseif rrProvId == "openai" then
+        rrKey = config.providers.openai and config.providers.openai.apiKey or ""
+    elseif rrProvId == "gemini" then
+        rrKey = config.providers.gemini and config.providers.gemini.apiKey or ""
+    end
+    local needsKey = (rrProvId == "freepik" or rrProvId == "grok"
+        or rrProvId == "openai" or rrProvId == "gemini")
+    if needsKey and rrKey == "" then
+        itm.ImageProgress.Text = "Set " .. rrProvId
+            .. " API key (Step 1) — re-roll provider needs it."
+        itm.ImageProgress.StyleSheet = "color: orange;"
+        return
+    end
+
+    if not screenplayData then
+        itm.ImageProgress.Text = "Parse a screenplay first (Step 2)."
+        itm.ImageProgress.StyleSheet = "color: red;"
+        return
+    end
+
+    itm.ImageProgress.Text = "Regenerating " .. shotKey
+        .. " on " .. rrProvId .. " (" .. rrModel .. ")..."
+    itm.ImageProgress.StyleSheet = "color: #888;"
+
+    -- Save key to a temp file (same pattern as GenAllImages).
+    local keyfile = os.tmpname()
+    local kf = io.open(keyfile, "w")
+    if kf then kf:write(rrKey); kf:close() end
+
+    -- Build character_images JSON from the wizard's in-memory map so
+    -- the embedded Python can stamp screenplay.characters before the
+    -- regenerate call reads reference_image_path off them.
+    local charImgParts = {}
+    for name, imgPath in pairs(characterImages) do
+        local safeName = name:gsub('"', '\\"')
+        local safeImg = imgPath:gsub("\\", "\\\\"):gsub('"', '\\"')
+        table.insert(charImgParts, '"' .. safeName .. '":"' .. safeImg .. '"')
+    end
+    local charImgJson = "{" .. table.concat(charImgParts, ",") .. "}"
+
+    local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeStyle = (itm.StylePath.Text or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+
+    -- Per-provider model kwarg routing (mirrors the standalone tool
+    -- and Step-4 main image gen).
+    local extraModelKwargs = ""
+    if rrModel ~= "" then
+        if rrProvId == "freepik" then
+            extraModelKwargs = '        freepik_image_api="' .. rrModel .. '",\n'
+        elseif rrProvId == "openai" then
+            extraModelKwargs = '        openai_model="' .. rrModel .. '",\n'
+        elseif rrProvId == "gemini" then
+            extraModelKwargs = '        gemini_model="' .. rrModel .. '",\n'
+        end
+    end
+
+    local code = 'import json, traceback, os\n'
+        .. projectSlugCode
+        .. 'try:\n'
+        .. '    from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+        .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+        .. '    from script_to_screen.api.registry import create_image_provider\n'
+        .. '    from script_to_screen.pipeline.image_gen import build_image_prompt, regenerate_single_image\n'
+        .. '    from script_to_screen.config import GenerationDefaults\n'
+        .. '    from script_to_screen.manifest import record_generated_image\n'
+        .. '    script_path = "' .. safePath .. '"\n'
+        .. '    if script_path.lower().endswith(".pdf"):\n'
+        .. '        screenplay = parse_pdf(script_path)\n'
+        .. '    else:\n'
+        .. '        screenplay = parse_fountain(script_path)\n'
+        .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
+        .. '    for name, path in char_images.items():\n'
+        .. '        if name in screenplay.characters:\n'
+        .. '            screenplay.characters[name].reference_image_path = path\n'
+        .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
+        .. '    provider = create_image_provider("' .. rrProvId .. '",\n'
+        .. '        api_key=api_key, server_url="' .. safeServerUrl .. '")\n'
+        .. '    defaults = GenerationDefaults(\n'
+        .. '        aspect_ratio="' .. (config.aspectRatio or "widescreen_16_9") .. '",\n'
+        .. '        creative_detailing=' .. tostring(config.detailing or 33) .. ',\n'
+        .. '    )\n'
+        .. '    target = "' .. shotKey .. '"\n'
+        .. '    found_shot, found_scene, found_idx = None, None, -1\n'
+        .. '    for scene in screenplay.scenes:\n'
+        .. '        for si, shot in enumerate(scene.shots):\n'
+        .. '            if f"s{scene.index}_sh{si}" == target:\n'
+        .. '                found_shot, found_scene, found_idx = shot, scene, si\n'
+        .. '                break\n'
+        .. '    if found_shot is None:\n'
+        .. '        raise RuntimeError(f"Shot {target!r} not found in current screenplay")\n'
+        .. '    base_prompt = build_image_prompt(found_shot, found_scene, screenplay, shot_idx=found_idx)\n'
+        .. '    char_refs = {}\n'
+        .. '    for c in found_shot.characters_present:\n'
+        .. '        ch = screenplay.characters.get(c)\n'
+        .. '        if ch and ch.reference_image_path:\n'
+        .. '            char_refs[c] = ch.reference_image_path\n'
+        .. '    final_prompt = provider.build_prompt(base_prompt, char_refs)\n'
+        .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
+        .. '    actual = regenerate_single_image(\n'
+        .. '        target, final_prompt, provider, "' .. safeOutput .. '",\n'
+        .. '        style_reference_path=style_path, defaults=defaults,\n'
+        .. '        character_refs=char_refs,\n'
+        .. extraModelKwargs
+        .. '    )\n'
+        .. '    if not actual:\n'
+        .. '        raise RuntimeError("Provider returned no image — check console for details")\n'
+        .. '    try:\n'
+        .. '        record_generated_image(\n'
+        .. '            project_slug=project_slug,\n'
+        .. '            filename=os.path.basename(actual),\n'
+        .. '            file_path=actual,\n'
+        .. '            shot_key=target,\n'
+        .. '            prompt=final_prompt,\n'
+        .. '            provider=type(provider).__name__,\n'
+        .. '            provider_settings={"model": "' .. rrModel .. '"},\n'
+        .. '            style_reference_path=style_path or "",\n'
+        .. '            character_refs=char_refs)\n'
+        .. '    except Exception: pass\n'
+        .. '    print(json.dumps({"status":"ok","shot_key":target,"file_path":actual}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
+
+    local result = runPython(code)
+    os.remove(keyfile)
+
+    local jsonStr = extractLastJsonLine(result)
+    if not jsonStr then
+        itm.ImageProgress.Text = "Regen failed — see Resolve Console."
+        itm.ImageProgress.StyleSheet = "color: red;"
+        if result then print("[ScriptToScreen] " .. result:sub(1, 600)) end
+        return
+    end
+    local data = JSON.decode(jsonStr)
+    if not data or data.status ~= "ok" then
+        itm.ImageProgress.Text = "Regen error: " .. ((data and data.error) or "Unknown")
+        itm.ImageProgress.StyleSheet = "color: red;"
+        if data and data.trace then print("[ScriptToScreen] " .. data.trace) end
+        return
+    end
+
+    -- Mark shot as Done in the tree, drop from failedImages, import.
+    generatedImages[shotKey] = data.file_path
+    failedImages[shotKey] = nil
+    pcall(function()
+        local project = resolve:GetProjectManager():GetCurrentProject()
+        if project then
+            local mp = project:GetMediaPool()
+            local rootF = mp:GetRootFolder()
+            local stsBin = nil
+            for _, f in pairs(rootF:GetSubFolders() or {}) do
+                if f:GetName() == "ScriptToScreen" then stsBin = f; break end
+            end
+            if not stsBin then stsBin = mp:AddSubFolder(rootF, "ScriptToScreen") end
+            local epPfx = buildEpisodePrefix()
+            local ep = stsBin
+            for _, f in pairs(stsBin:GetSubFolders() or {}) do
+                if f:GetName() == epPfx then ep = f; break end
+            end
+            if ep == stsBin then ep = mp:AddSubFolder(stsBin, epPfx) end
+            local sceneBinName = "S" .. tostring(sceneIdx)
+            local sceneBin = nil
+            for _, f in pairs(ep:GetSubFolders() or {}) do
+                if f:GetName() == sceneBinName then sceneBin = f; break end
+            end
+            if not sceneBin then sceneBin = mp:AddSubFolder(ep, sceneBinName) end
+            local imgBin = nil
+            for _, f in pairs(sceneBin:GetSubFolders() or {}) do
+                if f:GetName() == "Images" then imgBin = f; break end
+            end
+            if not imgBin then imgBin = mp:AddSubFolder(sceneBin, "Images") end
+            mp:SetCurrentFolder(imgBin)
+            mp:ImportMedia({data.file_path})
+        end
+    end)
+    pcall(populateImageTree)
+    itm.ImageProgress.Text = "Regenerated " .. shotKey
+        .. " (" .. rrProvId .. "/" .. rrModel .. ")"
+    itm.ImageProgress.StyleSheet = "color: green; font-weight: bold;"
+end
+
+
+-- ============================================================
+-- STEP 8: Regenerate Selected Video
+-- ============================================================
+-- Single-shot re-roll. Re-feeds the start frame produced by image-gen
+-- (without it, video providers fall back to text-to-video and the
+-- output bears no resemblance to the still). Uses the re-roll
+-- provider+model combos so the user can swap models per-shot.
+
+function win.On.RegenVideo.Clicked(ev)
+    local sel = itm.VideoTree:CurrentItem()
+    if not sel then
+        itm.VideoProgress.Text = "Select a shot row in the tree first."
+        itm.VideoProgress.StyleSheet = "color: orange;"
+        return
+    end
+    local sceneIdx = tonumber(sel.Text[0])
+    local shotIdx1 = tonumber(sel.Text[1])
+    if not sceneIdx or not shotIdx1 then
+        itm.VideoProgress.Text = "Could not read shot from row."
+        itm.VideoProgress.StyleSheet = "color: red;"
+        return
+    end
+    local shotKey = "s" .. tostring(sceneIdx) .. "_sh" .. tostring(shotIdx1 - 1)
+
+    local rrProvId = getVideoProviderId(itm.RegenVideoProvider.CurrentIndex)
+    local rrModel = itm.RegenVideoModel.CurrentText or ""
+    if not rrModel or rrModel == "" or rrModel:match("^%(") then
+        rrModel = ""
+    end
+
+    local rrKey = ""
+    if rrProvId == "freepik" then
+        rrKey = config.providers.freepik.apiKey or ""
+    elseif rrProvId == "grok" then
+        rrKey = config.providers.grok.apiKey or ""
+    elseif rrProvId == "openai" then
+        rrKey = config.providers.openai and config.providers.openai.apiKey or ""
+    end
+    local needsKey = (rrProvId == "freepik" or rrProvId == "grok" or rrProvId == "openai")
+    if needsKey and rrKey == "" then
+        itm.VideoProgress.Text = "Set " .. rrProvId
+            .. " API key (Step 1) — re-roll provider needs it."
+        itm.VideoProgress.StyleSheet = "color: orange;"
+        return
+    end
+
+    if not screenplayData then
+        itm.VideoProgress.Text = "Parse a screenplay first (Step 2)."
+        itm.VideoProgress.StyleSheet = "color: red;"
+        return
+    end
+
+    itm.VideoProgress.Text = "Regenerating " .. shotKey
+        .. " on " .. rrProvId .. " (" .. rrModel .. ")..."
+    itm.VideoProgress.StyleSheet = "color: #888;"
+
+    local keyfile = os.tmpname()
+    local kf = io.open(keyfile, "w")
+    if kf then kf:write(rrKey); kf:close() end
+
+    local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+    local duration = itm.DurationSpin and itm.DurationSpin.Value or 5
+
+    local extraModelKwargs = ""
+    if rrModel ~= "" then
+        if rrProvId == "freepik" then
+            extraModelKwargs = '        video_model="' .. rrModel .. '",\n'
+        elseif rrProvId == "openai" then
+            extraModelKwargs = '        openai_video_model="' .. rrModel .. '",\n'
+        end
+    end
+
+    local code = 'import json, traceback, os, glob, re\n'
+        .. 'try:\n'
+        .. '    from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+        .. '    from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+        .. '    from script_to_screen.api.registry import create_video_provider\n'
+        .. '    from script_to_screen.pipeline.video_gen import build_motion_prompt, regenerate_single_video\n'
+        .. '    from script_to_screen.config import GenerationDefaults\n'
+        .. '    script_path = "' .. safePath .. '"\n'
+        .. '    if script_path.lower().endswith(".pdf"):\n'
+        .. '        screenplay = parse_pdf(script_path)\n'
+        .. '    else:\n'
+        .. '        screenplay = parse_fountain(script_path)\n'
+        .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
+        .. '    provider = create_video_provider("' .. rrProvId .. '",\n'
+        .. '        api_key=api_key, server_url="' .. safeServerUrl .. '")\n'
+        .. '    target = "' .. shotKey .. '"\n'
+        .. '    # Find the latest start frame for this shot from the\n'
+        .. '    # images dir (matches the format generated images use).\n'
+        .. '    img_dir = "' .. safeOutput .. '/images"\n'
+        .. '    image_files = []\n'
+        .. '    for ext in ("png","jpg","jpeg","webp"):\n'
+        .. '        image_files.extend(glob.glob(os.path.join(img_dir, f"*.{ext}")))\n'
+        .. '    latest = ""\n'
+        .. '    for f in sorted(image_files, key=lambda p: os.path.getmtime(p)):\n'
+        .. '        bn = os.path.splitext(os.path.basename(f))[0]\n'
+        .. '        m = re.match(r"(s\\d+_sh\\d+)", bn)\n'
+        .. '        if m and m.group(1) == target:\n'
+        .. '            latest = f\n'
+        .. '    if not latest:\n'
+        .. '        raise RuntimeError(f"No start frame found for {target} — generate the image first on Step 6.")\n'
+        .. '    # Build motion prompt from the screenplay shot.\n'
+        .. '    found_shot, found_scene = None, None\n'
+        .. '    for scene in screenplay.scenes:\n'
+        .. '        for si, shot in enumerate(scene.shots):\n'
+        .. '            if f"s{scene.index}_sh{si}" == target:\n'
+        .. '                found_shot, found_scene = shot, scene\n'
+        .. '                break\n'
+        .. '    if found_shot is None:\n'
+        .. '        raise RuntimeError(f"Shot {target!r} not found in current screenplay")\n'
+        .. '    motion = build_motion_prompt(found_shot, found_scene)\n'
+        .. '    actual = regenerate_single_video(\n'
+        .. '        target, motion, latest, provider, "' .. safeOutput .. '",\n'
+        .. '        duration=' .. tostring(duration) .. ',\n'
+        .. extraModelKwargs
+        .. '    )\n'
+        .. '    if not actual:\n'
+        .. '        raise RuntimeError("Provider returned no video — check console for details")\n'
+        .. '    print(json.dumps({"status":"ok","shot_key":target,"file_path":actual,"start_image":latest}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"status":"error","error":str(e),"trace":traceback.format_exc()}))\n'
+
+    local result = runPython(code)
+    os.remove(keyfile)
+
+    local jsonStr = extractLastJsonLine(result)
+    if not jsonStr then
+        itm.VideoProgress.Text = "Regen failed — see Resolve Console."
+        itm.VideoProgress.StyleSheet = "color: red;"
+        if result then print("[ScriptToScreen] " .. result:sub(1, 600)) end
+        return
+    end
+    local data = JSON.decode(jsonStr)
+    if not data or data.status ~= "ok" then
+        itm.VideoProgress.Text = "Regen error: " .. ((data and data.error) or "Unknown")
+        itm.VideoProgress.StyleSheet = "color: red;"
+        if data and data.trace then print("[ScriptToScreen] " .. data.trace) end
+        return
+    end
+
+    generatedVideos[shotKey] = data.file_path
+    failedVideos[shotKey] = nil
+    pcall(function()
+        local project = resolve:GetProjectManager():GetCurrentProject()
+        if project then
+            local mp = project:GetMediaPool()
+            local rootF = mp:GetRootFolder()
+            local stsBin = nil
+            for _, f in pairs(rootF:GetSubFolders() or {}) do
+                if f:GetName() == "ScriptToScreen" then stsBin = f; break end
+            end
+            if not stsBin then stsBin = mp:AddSubFolder(rootF, "ScriptToScreen") end
+            local epPfx = buildEpisodePrefix()
+            local ep = stsBin
+            for _, f in pairs(stsBin:GetSubFolders() or {}) do
+                if f:GetName() == epPfx then ep = f; break end
+            end
+            if ep == stsBin then ep = mp:AddSubFolder(stsBin, epPfx) end
+            local sceneBinName = "S" .. tostring(sceneIdx)
+            local sceneBin = nil
+            for _, f in pairs(ep:GetSubFolders() or {}) do
+                if f:GetName() == sceneBinName then sceneBin = f; break end
+            end
+            if not sceneBin then sceneBin = mp:AddSubFolder(ep, sceneBinName) end
+            local vidBin = nil
+            for _, f in pairs(sceneBin:GetSubFolders() or {}) do
+                if f:GetName() == "Videos" then vidBin = f; break end
+            end
+            if not vidBin then vidBin = mp:AddSubFolder(sceneBin, "Videos") end
+            mp:SetCurrentFolder(vidBin)
+            mp:ImportMedia({data.file_path})
+        end
+    end)
+    pcall(populateVideoTree)
+    itm.VideoProgress.Text = "Regenerated " .. shotKey
+        .. " (" .. rrProvId .. "/" .. rrModel .. ")"
+    itm.VideoProgress.StyleSheet = "color: green; font-weight: bold;"
+end
+
 
 -- ImageTree selection → show the EXACT prompt that Python's build_image_prompt produces
 -- Also checks the manifest for the previously-used prompt if the image was already generated

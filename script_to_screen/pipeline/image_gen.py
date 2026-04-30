@@ -297,33 +297,50 @@ def regenerate_single_image(
     style_reference_path: Optional[str] = None,
     defaults: Optional[GenerationDefaults] = None,
     character_refs: Optional[dict[str, str]] = None,
+    **provider_kwargs,
 ) -> Optional[str]:
-    """Regenerate a single image by shot key."""
+    """Regenerate a single image by shot key.
+
+    ``provider_kwargs`` is forwarded verbatim to ``provider.generate_image``.
+    The wizard's Step-6 re-roll combo uses this to override the saved
+    ``freepik_image_api`` / ``openai_model`` / ``gemini_model`` for one
+    shot only — the natural fix when one model keeps mis-rendering a
+    particular prompt is to retry on another without re-saving config.
+    """
     if defaults is None:
         defaults = GenerationDefaults()
 
     images_dir = ensure_dir(os.path.join(output_dir, "images"))
+
+    # Build the kwargs dict in two layers: defaults from GenerationDefaults
+    # first (matches the original behavior), then any caller overrides
+    # (so a per-call freepik_image_api="seedream-4" wins over the saved
+    # default "mystic"). Done explicitly so the override semantics are
+    # legible to the next reader.
+    call_kwargs = dict(
+        style_adherence=defaults.creative_detailing,
+        aspect_ratio=defaults.aspect_ratio,
+        model=defaults.freepik_model,
+        creative_detailing=defaults.creative_detailing,
+        freepik_engine=defaults.freepik_engine,
+        freepik_resolution=defaults.freepik_resolution,
+        freepik_structure_strength=defaults.freepik_structure_strength,
+        freepik_image_api=defaults.freepik_image_api,
+        openai_model=defaults.openai_model,
+        gemini_model=defaults.gemini_model,
+        openai_quality=defaults.openai_quality,
+        openai_size=defaults.openai_size,
+        openai_output_format=defaults.openai_output_format,
+        openai_background=defaults.openai_background,
+    )
+    call_kwargs.update(provider_kwargs)
 
     try:
         task_id = provider.generate_image(
             prompt=prompt,
             style_reference_path=style_reference_path,
             character_refs=character_refs or {},
-            style_adherence=defaults.creative_detailing,
-            aspect_ratio=defaults.aspect_ratio,
-            model=defaults.freepik_model,
-            creative_detailing=defaults.creative_detailing,
-            # Per-model passthrough (ignored by providers that don't support these)
-            freepik_engine=defaults.freepik_engine,
-            freepik_resolution=defaults.freepik_resolution,
-            freepik_structure_strength=defaults.freepik_structure_strength,
-            freepik_image_api=defaults.freepik_image_api,
-            openai_model=defaults.openai_model,
-            gemini_model=defaults.gemini_model,
-            openai_quality=defaults.openai_quality,
-            openai_size=defaults.openai_size,
-            openai_output_format=defaults.openai_output_format,
-            openai_background=defaults.openai_background,
+            **call_kwargs,
         )
 
         result = poll_until_complete(
