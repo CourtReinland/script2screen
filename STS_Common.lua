@@ -313,6 +313,24 @@ STS_geminiImageModels = {
     "imagen-4.0-fast-generate-001",
 }
 
+-- Display labels for the Gemini combo. The Nano Banana family doesn't
+-- self-identify in its model id, so users picking from the dropdown
+-- don't recognize which is which without the colloquial name. Labels
+-- include the full id so the user still sees what the API receives.
+STS_geminiLabelById = {
+    ["gemini-2.5-flash-image"]         = "gemini-2.5-flash-image (standard Nano Banana)",
+    ["gemini-3.1-flash-image-preview"] = "gemini-3.1-flash-image-preview (Nano Banana 2)",
+    ["gemini-3-pro-image-preview"]     = "gemini-3-pro-image-preview (Nano Banana Pro)",
+    ["imagen-4.0-generate-001"]        = "imagen-4.0-generate-001 (Imagen 4 standard)",
+    ["imagen-4.0-ultra-generate-001"]  = "imagen-4.0-ultra-generate-001 (Imagen 4 ultra)",
+    ["imagen-4.0-fast-generate-001"]   = "imagen-4.0-fast-generate-001 (Imagen 4 fast)",
+}
+function STS_geminiIdToLabel(id) return STS_geminiLabelById[id] or id end
+function STS_geminiLabelToId(lbl)
+    if not lbl or lbl == "" then return "gemini-2.5-flash-image" end
+    return (lbl:match("^([^%s]+)") or lbl)
+end
+
 -- Freepik video-API endpoints, mirrors VIDEO_ENDPOINTS in freepik_client.
 STS_freepikVideoModels = {
     "kling-v3-omni", "kling-v2-5-pro", "kling-v2-6-pro", "kling-o1-pro",

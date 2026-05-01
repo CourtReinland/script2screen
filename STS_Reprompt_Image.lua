@@ -191,7 +191,10 @@ local function refreshModelCombo()
     local saved = (config[choices.configKey] or choices.default)
     local idx = 0
     for i, v in ipairs(choices.items) do
-        itm.ModelCombo:AddItem(v)
+        -- Friendly Nano Banana / Imagen label for Gemini ids; other
+        -- providers' ids are already self-explanatory.
+        local display = (pid == "gemini") and STS_geminiIdToLabel(v) or v
+        itm.ModelCombo:AddItem(display)
         if v == saved then idx = i - 1 end
     end
     itm.ModelCombo.CurrentIndex = idx
@@ -321,7 +324,12 @@ function win.On.Generate.Clicked(ev)
 
     -- Selected model from the per-provider Model combo, with sensible
     -- per-provider routing into the right reprompt_image() kwarg.
+    -- For Gemini the combo shows "<id> (<friendly>)"; strip the
+    -- parenthetical back to the bare id before passing to the API.
     local chosenModel = itm.ModelCombo.CurrentText or ""
+    if providerId == "gemini" and chosenModel ~= "" then
+        chosenModel = STS_geminiLabelToId(chosenModel)
+    end
     local extraModelKwargs = ""
     if providerId == "freepik" then
         -- For freepik, the Model combo selects the API endpoint id;

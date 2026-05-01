@@ -1464,16 +1464,43 @@ local openaiModels = {
 for _, v in ipairs(openaiModels) do itm.OpenAIModelCombo:AddItem(v) end
 
 -- Google Gemini / Imagen image models. Order = recommended-first.
--- Mirrors SUPPORTED_MODELS in script_to_screen/api/gemini_image_client.py
+-- Mirrors SUPPORTED_MODELS in script_to_screen/api/gemini_image_client.py.
+-- The combo shows colloquial labels ("Nano Banana", "Nano Banana 2",
+-- "Nano Banana Pro") alongside the underlying model id so users can
+-- recognize the friendly names without losing visibility into what
+-- the API actually receives.
 local geminiModels = {
-    "gemini-2.5-flash-image",            -- "Nano Banana" — fast/cheap default
-    "gemini-3.1-flash-image-preview",    -- newer general-purpose flash
-    "gemini-3-pro-image-preview",        -- professional, higher-quality
+    "gemini-2.5-flash-image",            -- standard Nano Banana — fast/cheap default
+    "gemini-3.1-flash-image-preview",    -- Nano Banana 2
+    "gemini-3-pro-image-preview",        -- Nano Banana Pro
     "imagen-4.0-generate-001",           -- Imagen 4 standard
     "imagen-4.0-ultra-generate-001",     -- Imagen 4 ultra
     "imagen-4.0-fast-generate-001",      -- Imagen 4 fast
 }
-for _, v in ipairs(geminiModels) do itm.GeminiModelCombo:AddItem(v) end
+
+-- Display-label helpers. The combo holds labels; ``geminiLabelToId``
+-- pulls the model id back out for the API call. ``geminiIdToLabel``
+-- restores the right combo entry from the saved id at startup.
+local geminiLabelById = {
+    ["gemini-2.5-flash-image"]         = "gemini-2.5-flash-image (standard Nano Banana)",
+    ["gemini-3.1-flash-image-preview"] = "gemini-3.1-flash-image-preview (Nano Banana 2)",
+    ["gemini-3-pro-image-preview"]     = "gemini-3-pro-image-preview (Nano Banana Pro)",
+    ["imagen-4.0-generate-001"]        = "imagen-4.0-generate-001 (Imagen 4 standard)",
+    ["imagen-4.0-ultra-generate-001"]  = "imagen-4.0-ultra-generate-001 (Imagen 4 ultra)",
+    ["imagen-4.0-fast-generate-001"]   = "imagen-4.0-fast-generate-001 (Imagen 4 fast)",
+}
+local function geminiIdToLabel(id) return geminiLabelById[id] or id end
+local function geminiLabelToId(lbl)
+    -- Strip any " (...)" parenthetical the user sees back to the bare id.
+    if not lbl or lbl == "" then return "gemini-2.5-flash-image" end
+    return (lbl:match("^([^%s]+)") or lbl)
+end
+-- Build a parallel display list for setComboToValue lookups; same
+-- order as geminiModels so indices line up.
+local geminiModelLabels = {}
+for i, id in ipairs(geminiModels) do geminiModelLabels[i] = geminiIdToLabel(id) end
+
+for _, lbl in ipairs(geminiModelLabels) do itm.GeminiModelCombo:AddItem(lbl) end
 
 local openaiQualities = {"auto", "low", "medium", "high"}
 for _, v in ipairs(openaiQualities) do itm.OpenAIQualityCombo:AddItem(v) end
@@ -1512,7 +1539,7 @@ do
     setComboToValue(itm.FreepikApiCombo, names, freepikApiIdToName(savedApi))
 end
 setComboToValue(itm.OpenAIModelCombo, openaiModels, config.openaiModel or "gpt-image-1")
-setComboToValue(itm.GeminiModelCombo, geminiModels, config.geminiModel or "gemini-2.5-flash-image")
+setComboToValue(itm.GeminiModelCombo, geminiModelLabels, geminiIdToLabel(config.geminiModel or "gemini-2.5-flash-image"))
 setComboToValue(itm.OpenAIQualityCombo, openaiQualities, config.openaiQuality)
 setComboToValue(itm.OpenAISizeCombo, openaiSizes, config.openaiSize)
 setComboToValue(itm.OpenAIFormatCombo, openaiFormats, config.openaiOutputFormat)
@@ -1818,7 +1845,9 @@ local function onNext()
         config.openaiOutputFormat = itm.OpenAIFormatCombo.CurrentText or "png"
         config.openaiBackground = itm.OpenAIBgCombo.CurrentText or "auto"
         -- Gemini / Imagen model selector
-        config.geminiModel = itm.GeminiModelCombo.CurrentText or "gemini-2.5-flash-image"
+        -- The combo shows "<id> (<label>)"; strip the parenthetical
+        -- to recover the bare model id the API expects.
+        config.geminiModel = geminiLabelToId(itm.GeminiModelCombo.CurrentText) or "gemini-2.5-flash-image"
         saveConfig()
     end
 
@@ -1977,7 +2006,11 @@ local function refreshRegenImageModelCombo()
     itm.RegenImageModel.Enabled = true
     local idx = 0
     for i, v in ipairs(items) do
-        itm.RegenImageModel:AddItem(v)
+        -- Show the friendly Nano Banana / Imagen label for Gemini ids.
+        -- Other providers stay as raw model ids — those are already
+        -- recognizable (gpt-image-1, mystic, flux-2-pro, …).
+        local display = (pid == "gemini") and geminiIdToLabel(v) or v
+        itm.RegenImageModel:AddItem(display)
         if v == default then idx = i - 1 end
     end
     itm.RegenImageModel.CurrentIndex = idx
@@ -3111,6 +3144,11 @@ function win.On.RegenImage.Clicked(ev)
     local rrModel = itm.RegenImageModel.CurrentText or ""
     if not rrModel or rrModel == "" or rrModel:match("^%(") then
         rrModel = ""
+    end
+    -- The Gemini combo items are "<id> (<friendly label>)"; strip back
+    -- to the bare id before passing to the provider as gemini_model.
+    if rrProvId == "gemini" and rrModel ~= "" then
+        rrModel = geminiLabelToId(rrModel)
     end
 
     -- Resolve the API key for the re-roll provider.
