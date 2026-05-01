@@ -887,8 +887,21 @@ local win = disp:AddWindow({
                 ui:Label{Text = "<b>Generation Settings</b>", StyleSheet = "padding-top: 10px;"},
                 -- Freepik image API (which endpoint/model to hit).
                 -- Hidden when image provider isn't Freepik.
+                -- All conditionally-hidden rows default to Hidden=true.
+                -- refreshProviderControls() then SHOWS the ones that
+                -- match the active provider. Without this initial-hidden
+                -- state, Fusion's first layout pass ran with every row
+                -- visible — they overflowed the page bounds and rendered
+                -- on top of the Browse/Clear buttons at the top, eating
+                -- their click events. Multiple "fix the Browse button"
+                -- regressions traced back to this; declaring the rows
+                -- collapsed at construction makes the visibility logic
+                -- one-directional (show what's needed) rather than
+                -- two-directional (show + hide), which Fusion handles
+                -- reliably on first render.
                 ui:HGroup{
                     ID = "FreepikApiRow",
+                    Hidden = true,
                     ui:Label{Text = "Freepik Model:", Weight = 0.2},
                     ui:ComboBox{ID = "FreepikApiCombo", Weight = 0.8},
                 },
@@ -896,6 +909,7 @@ local win = disp:AddWindow({
                 -- Only relevant when freepikApi == "mystic".
                 ui:HGroup{
                     ID = "MysticStyleRow",
+                    Hidden = true,
                     ui:Label{Text = "Mystic Style:", Weight = 0.2},
                     ui:ComboBox{ID = "ModelCombo", Weight = 0.8},
                 },
@@ -931,16 +945,19 @@ local win = disp:AddWindow({
                 -- Freepik Mystic per-model options (shown only when API == mystic)
                 ui:HGroup{
                     ID = "FreepikEngineRow",
+                    Hidden = true,
                     ui:Label{Text = "Engine (Mystic):", Weight = 0.2},
                     ui:ComboBox{ID = "FreepikEngineCombo", Weight = 0.8},
                 },
                 ui:HGroup{
                     ID = "FreepikResolutionRow",
+                    Hidden = true,
                     ui:Label{Text = "Resolution (Mystic):", Weight = 0.2},
                     ui:ComboBox{ID = "FreepikResolutionCombo", Weight = 0.8},
                 },
                 ui:HGroup{
                     ID = "FreepikStructureRow",
+                    Hidden = true,
                     ui:Label{Text = "Structure (Mystic):", Weight = 0.2},
                     ui:Slider{ID = "FreepikStructureSlider", Minimum = 0, Maximum = 100, Value = 50, Weight = 0.6},
                     ui:Label{ID = "FreepikStructureValue", Text = "50", Weight = 0.2},
@@ -949,6 +966,7 @@ local win = disp:AddWindow({
                 -- OpenAI image gen per-model options (shown only when imageProvider == "openai")
                 ui:HGroup{
                     ID = "OpenAIModelRow",
+                    Hidden = true,
                     ui:Label{Text = "Model (OpenAI):", Weight = 0.2},
                     ui:ComboBox{ID = "OpenAIModelCombo", Weight = 0.8},
                 },
@@ -956,26 +974,31 @@ local win = disp:AddWindow({
                 -- Google Gemini / Imagen model selector (shown only when imageProvider == "gemini")
                 ui:HGroup{
                     ID = "GeminiModelRow",
+                    Hidden = true,
                     ui:Label{Text = "Model (Gemini):", Weight = 0.2},
                     ui:ComboBox{ID = "GeminiModelCombo", Weight = 0.8},
                 },
                 ui:HGroup{
                     ID = "OpenAIQualityRow",
+                    Hidden = true,
                     ui:Label{Text = "Quality (OpenAI):", Weight = 0.2},
                     ui:ComboBox{ID = "OpenAIQualityCombo", Weight = 0.8},
                 },
                 ui:HGroup{
                     ID = "OpenAISizeRow",
+                    Hidden = true,
                     ui:Label{Text = "Size (OpenAI):", Weight = 0.2},
                     ui:ComboBox{ID = "OpenAISizeCombo", Weight = 0.8},
                 },
                 ui:HGroup{
                     ID = "OpenAIFormatRow",
+                    Hidden = true,
                     ui:Label{Text = "Format (OpenAI):", Weight = 0.2},
                     ui:ComboBox{ID = "OpenAIFormatCombo", Weight = 0.8},
                 },
                 ui:HGroup{
                     ID = "OpenAIBgRow",
+                    Hidden = true,
                     ui:Label{Text = "Background (OpenAI):", Weight = 0.2},
                     ui:ComboBox{ID = "OpenAIBgCombo", Weight = 0.8},
                 },
