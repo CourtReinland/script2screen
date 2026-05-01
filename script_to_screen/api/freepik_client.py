@@ -346,12 +346,21 @@ class FreepikClient:
         """
         self.video_limiter.wait()
 
-        submit_path, _ = VIDEO_ENDPOINTS.get(
-            model, VIDEO_ENDPOINTS["kling-v3-omni"]
-        )
         if model not in VIDEO_ENDPOINTS:
-            logger.warning(f"Unknown video model '{model}', falling back to kling-v3-omni")
-            model = "kling-v3-omni"
+            # Silent fall-through used to remap unknown models to kling and
+            # send the request anyway — that produced the "403 forbidden
+            # on api.freepik.com/v1/video/kling-v3-omni/generate-pro"
+            # bug when a sora-* id leaked into Freepik's path because the
+            # wizard's flat video-model dropdown didn't route by provider.
+            # Refuse loudly so the routing layer above gets fixed instead
+            # of the request quietly mis-firing.
+            raise ValueError(
+                f"Freepik video provider received unknown model {model!r}. "
+                f"Sora models (sora-2 / sora-2-pro) must route through the "
+                f"OpenAI provider, not Freepik. Known Freepik video models: "
+                f"{sorted(VIDEO_ENDPOINTS.keys())}."
+            )
+        submit_path, _ = VIDEO_ENDPOINTS[model]
 
         # Snap duration to a model-supported value. Without this, the
         # pipeline's auto-estimated 3/7/12 returns ``400 Validation

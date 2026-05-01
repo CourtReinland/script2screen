@@ -3560,7 +3560,20 @@ end
 -- ============================================================
 
 function win.On.GenAllVideos.Clicked(ev)
-    local vidPid = config.videoProvider
+    -- Resolve the actual provider for the chosen model. The Step-8
+    -- model dropdown mixes Freepik-hosted models (kling-*, seedance-*,
+    -- minimax-*, wan-*) with OpenAI Sora variants (sora-2, sora-2-pro)
+    -- in one flat list. The user's saved videoProvider is "freepik" by
+    -- default; if they pick sora-2 the request must still go to OpenAI,
+    -- not Freepik (which would 404 the model lookup and silently fall
+    -- back to kling-v3-omni → 403). Route by model id.
+    local chosenModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
+    local function providerForVideoModel(model)
+        if model and model:match("^sora") then return "openai" end
+        return config.videoProvider or "freepik"
+    end
+    local vidPid = providerForVideoModel(chosenModel)
+
     if vidPid == "freepik" and (config.providers.freepik.apiKey or "") == "" then
         itm.VideoProgress.Text = "Set Freepik API key first (Step 1)!"
         itm.VideoProgress.StyleSheet = "color: red;"
@@ -3572,12 +3585,13 @@ function win.On.GenAllVideos.Clicked(ev)
         return
     end
     if vidPid == "openai" and (config.providers.openai and config.providers.openai.apiKey or "") == "" then
-        itm.VideoProgress.Text = "Set OpenAI API key first (Step 1)!"
+        itm.VideoProgress.Text = "Set OpenAI API key first (Step 1) — Sora needs an OpenAI key."
         itm.VideoProgress.StyleSheet = "color: red;"
         return
     end
 
-    itm.VideoProgress.Text = "Generating videos... (this will take a while)"
+    itm.VideoProgress.Text = "Generating videos on " .. vidPid
+        .. " (" .. chosenModel .. ")... (this will take a while)"
     itm.VideoProgress.StyleSheet = "color: #888;"
 
     local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
@@ -3585,12 +3599,12 @@ function win.On.GenAllVideos.Clicked(ev)
     local duration = itm.DurationSpin.Value or 5
 
     -- Persist Step 6 picks into config before Python reads them
-    config.videoModel = itm.VideoModelCombo.CurrentText or "kling-v3-omni"
+    config.videoModel = chosenModel
     config.videoCfgScale = (itm.VideoCfgSlider.Value or 50) / 100.0
     config.videoNegativePrompt = itm.VideoNegativePrompt.Text or ""
     saveConfig()
 
-    -- Resolve the API key for the selected video provider
+    -- Resolve the API key for the routed provider (vidPid, not config.videoProvider).
     local vidApiKey = ""
     if vidPid == "freepik" then
         vidApiKey = config.providers.freepik.apiKey or ""
