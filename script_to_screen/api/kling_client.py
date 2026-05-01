@@ -16,6 +16,8 @@ from typing import Optional
 import jwt
 import requests
 
+from ..utils import RateLimiter
+
 logger = logging.getLogger("ScriptToScreen")
 
 # Kling API base URLs
@@ -42,6 +44,14 @@ class KlingClient:
         self._session = requests.Session()
         self._token: Optional[str] = None
         self._token_expires_at: float = 0
+        # Kling enforces a per-minute rate on the lip-sync endpoint that
+        # rejects more than ~2 submissions per 60s (verified live: a
+        # sequential 6-shot batch failed shots 2/3/etc with
+        # ``429 Too Many Requests for /v1/videos/lip-sync``). Pace
+        # submissions at 30s — polling already takes 1-3 min per task,
+        # so this rarely adds wall-clock time when the API is actually
+        # working.
+        self._lipsync_limiter = RateLimiter(calls_per_minute=2)
 
     # ------------------------------------------------------------------
     # JWT Token Management
@@ -151,16 +161,48 @@ class KlingClient:
         if callback_url:
             body["callback_url"] = callback_url
 
+        # Rate-limit + retry-on-429 wrapper. The 30s spacing from the
+        # limiter prevents hitting Kling's per-minute window the first
+        # time; a flat 60s wait on each 429 covers the case where another
+        # client (or a residual pipeline run) consumed the slot.
+        url = f"{self.base_url}/v1/videos/lip-sync"
         logger.info(f"[Kling] POST /v1/videos/lip-sync  mode={mode}")
-        r = requests.post(
-            f"{self.base_url}/v1/videos/lip-sync",
-            headers=self._auth_headers(),
-            json=body,
-            timeout=30,
-        )
+        self._lipsync_limiter.wait()
+        r = None
+        for attempt in range(3):
+            r = requests.post(
+                url,
+                headers=self._auth_headers(),
+                json=body,
+                timeout=30,
+            )
+            if r.status_code != 429:
+                break
+            logger.warning(
+                f"[Kling] lip-sync rate-limited (429), waiting 60s before "
+                f"retry (attempt {attempt + 1}/3)..."
+            )
+            time.sleep(60)
+        if r is None:
+            raise RuntimeError("Kling lip-sync request never executed")
         if r.status_code != 200:
-            logger.error(f"[Kling] lip-sync failed: {r.status_code} {r.text[:300]}")
-        r.raise_for_status()
+            # Surface Kling's actual error body — the bare HTTPError that
+            # raise_for_status produces just says "Too Many Requests" and
+            # buries the message field that often clarifies what's wrong.
+            body_msg = ""
+            try:
+                body_json = r.json()
+                if isinstance(body_json, dict):
+                    body_msg = body_json.get("message") or body_json.get("error") or ""
+            except Exception:
+                body_msg = (r.text or "")[:300]
+            logger.error(
+                f"[Kling] lip-sync failed: {r.status_code} {body_msg or r.text[:300]}"
+            )
+            raise requests.HTTPError(
+                f"{r.status_code} {r.reason} for {url}: {body_msg or r.text[:200]}",
+                response=r,
+            )
 
         data = r.json()
         if data.get("code") != 0:
@@ -171,12 +213,23 @@ class KlingClient:
         return task_id
 
     def query_lipsync_task(self, task_id: str) -> dict:
-        """Poll lip sync task status. Returns normalized status dict."""
-        r = requests.get(
-            f"{self.base_url}/v1/videos/lip-sync/{task_id}",
-            headers=self._auth_headers(),
-            timeout=15,
-        )
+        """Poll lip sync task status. Returns normalized status dict.
+
+        The polling loop calls this every ~10 seconds. On a busy account
+        the polling itself can trip Kling's rate limit (separate from
+        the per-minute submission ceiling), so we retry once on 429 with
+        a short wait — the polling layer above already retries on
+        transient failures, but a clean wait here avoids surfacing the
+        rate-limit as a real task failure.
+        """
+        url = f"{self.base_url}/v1/videos/lip-sync/{task_id}"
+        for attempt in range(2):
+            r = requests.get(url, headers=self._auth_headers(), timeout=15)
+            if r.status_code == 429 and attempt == 0:
+                logger.warning("[Kling] poll rate-limited (429), waiting 30s...")
+                time.sleep(30)
+                continue
+            break
         r.raise_for_status()
         data = r.json()
 
