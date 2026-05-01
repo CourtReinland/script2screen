@@ -1,15 +1,40 @@
 # ScriptToScreen — Complete Architecture & Developer Guide
 
-**Version:** 1.5.2
+**Version:** 2.0 (experimental-shot-expansion branch)
 **Repo:** https://github.com/CourtReinland/script2screen
 **Runtime:** DaVinci Resolve Studio 20 (Fusion scripting) + Python 3.12+
 **Platform:** macOS (Apple Silicon optimized for MLX-Audio)
+
+For end-user installation and walkthrough, see **README.md**. This
+file covers the developer-facing architecture: directory layout,
+provider abstraction, the Lua↔Python boundary, and the debugging
+patterns that have evolved across the project.
+
+---
+
+## What's New Since v1.5.2
+
+The wizard expanded from 10 steps to **12** (two prompt-review pages
+inserted at positions 5 and 7). The provider matrix grew significantly:
+
+- **OpenAI** image (`gpt-image-1`/`-2`, DALL-E 2/3) and video (Sora 2 / Sora 2 Pro)
+- **Google AI Studio** image: Gemini ("Nano Banana", "Nano Banana 2", "Nano Banana Pro") + Imagen 4 standard/ultra/fast — with full character-reference and style-reference inlining
+- **Anthropic Claude** as a text/LLM provider (alongside the existing Grok)
+- **Multi-API Freepik** image dispatch — one provider, twelve endpoints (Mystic, Flux Dev/Pro/2-Pro/2-Turbo/2-Klein/Kontext-Pro, HyperFlux, Seedream-4/v4.5, Z-Image-Turbo, Runway)
+- **Multi-model Freepik** video — Kling v2.5 Pro / v2.6 Pro / o1 Pro / v3 Omni, Seedance Pro 1080p, MiniMax Hailuo 2.3, Wan v2.6 1080p
+
+Two new Python modules:
+
+- `parsing/llm_parser.py` — sends raw script text to any TextProvider with a JSON-extraction contract; emits the same `Screenplay` dataclass as the heuristic parser.
+- `pipeline/prompt_refiner.py` — splits each shot into a still-image prompt (no camera motion verbs) and a video-motion prompt; caches to `<output>/refined_prompts.json` so image and video gen share one refinement pass.
+
+Wizard regen flows now re-feed character references and start frames automatically, with per-shot Re-roll Provider/Model dropdowns on Steps 6 and 8 — useful when one model misinterprets a particular prompt and another nails it.
 
 ---
 
 ## What Is ScriptToScreen?
 
-ScriptToScreen (STS) is a DaVinci Resolve plugin that converts Hollywood-formatted screenplays (Fountain or PDF) into fully edited video timelines with AI-generated images, videos, voice acting, and lip-synced dialogue. It orchestrates multiple AI providers through a 10-step wizard and a suite of standalone tools.
+ScriptToScreen (STS) is a DaVinci Resolve plugin that converts screenplays (Fountain or PDF) into fully edited video timelines with AI-generated images, videos, voice acting, and lip-synced dialogue. It orchestrates 8+ providers through a 12-step wizard and a suite of standalone tools.
 
 ---
 
@@ -17,51 +42,68 @@ ScriptToScreen (STS) is a DaVinci Resolve plugin that converts Hollywood-formatt
 
 ```
 ScriptToScreen/                         ← Git repo root (github.com/CourtReinland/script2screen)
-├── ScriptToScreen.lua                  ← Main wizard (~2900 lines, launched from Resolve)
-├── STS_Common.lua                      ← Shared Lua infrastructure (config, Python bridge, bin helpers)
-├── STS_Toolbar.lua                     ← Persistent floating toolbar for all STS tools
-├── STS_Reprompt_Image.lua              ← Standalone: regenerate an image with edited prompt
-├── STS_Reprompt_Video.lua              ← Standalone: regenerate a video with edited prompt
+├── ScriptToScreen.lua                  ← Main wizard (~4500 lines now, 12 steps, launched from Resolve)
+├── STS_Common.lua                      ← Shared Lua infrastructure (config, Python bridge, bin helpers, provider+model lists)
+├── STS_Toolbar.lua                     ← Persistent floating toolbar — height bumped to 600px to fit the current button set
+├── STS_Reprompt_Image.lua              ← Standalone: Generate / Reprompt image (dual-mode + per-provider Model dropdown)
+├── STS_Reprompt_Video.lua              ← Standalone: Generate / Reprompt video (same dual-mode pattern)
 ├── STS_Generate_Audio.lua              ← Standalone: TTS dialogue generation for selected clip
 ├── STS_Lip_Sync.lua                    ← Standalone: lip-sync video+audio via Kling API
 ├── STS_ReframeShot.lua                 ← Standalone: AI camera angle manipulation
 ├── STS_ScriptRef.lua                   ← Standalone: floating screenplay reference viewer
+├── STS_ExpandShots.lua                 ← Standalone: LLM-driven shot expansion (Sora-style coverage)
+├── README.md                           ← End-user install + tutorial
+├── ARCHITECTURE.md                     ← This file (developer reference)
 ├── script_to_screen/                   ← Python package (pipeline + API clients)
 │   ├── __init__.py
-│   ├── config.py                       ← AppConfig dataclass, storage paths
+│   ├── config.py                       ← AppConfig + GenerationDefaults (now includes openai/gemini/claude fields)
 │   ├── manifest.py                     ← Per-project metadata persistence
-│   ├── screenplay_model.py             ← Data classes: Screenplay, Scene, Shot, DialogueLine, Character
-│   ├── fountain_parser.py              ← Fountain screenplay format parser
-│   ├── pdf_parser.py                   ← PDF screenplay parser (uses pdfplumber)
-│   ├── providers.py                    ← Abstract base classes for all provider types
-│   ├── registry.py                     ← Factory registry mapping provider IDs to classes
-│   ├── polling.py                      ← Generic async polling (poll_until_complete, poll_batch)
-│   ├── standalone.py                   ← CLI entry points for standalone Lua tools
+│   ├── standalone.py                   ← Entry points for standalone Lua tools (reprompt_image / reprompt_video / etc.)
+│   ├── parsing/
+│   │   ├── screenplay_model.py         ← Data classes: Screenplay, Scene, Shot, DialogueLine, Character
+│   │   ├── fountain_parser.py          ← Fountain screenplay format parser
+│   │   ├── pdf_parser.py               ← PDF screenplay parser (heuristic, uses pdfplumber)
+│   │   ├── llm_parser.py               ← LLM-driven parser — uses any TextProvider, JSON-extraction contract
+│   │   └── fountain_writer.py          ← Round-trip writer for Screenplay → fountain
 │   ├── api/                            ← API client implementations
-│   │   ├── freepik_client.py           ← Freepik REST API (image, video, lipsync)
+│   │   ├── providers.py                ← Abstract base classes (Image/Video/Voice/Lipsync/Text Provider)
+│   │   ├── registry.py                 ← Factory registry mapping provider IDs to classes
+│   │   ├── polling.py                  ← Generic async polling (poll_until_complete, poll_batch)
+│   │   ├── freepik_client.py           ← Freepik REST API — multi-API image (12 endpoints) + multi-model video (7 endpoints) + lipsync
 │   │   ├── freepik_provider.py         ← Provider adapters wrapping freepik_client
 │   │   ├── elevenlabs_client.py        ← ElevenLabs TTS API (voice clone + speech)
 │   │   ├── elevenlabs_provider.py      ← Provider adapter wrapping elevenlabs_client
 │   │   ├── comfyui_client.py           ← ComfyUI local server API
 │   │   ├── comfyui_provider.py         ← ComfyUI Flux (image) + LTX (video) providers
-│   │   ├── grok_provider.py            ← xAI Grok Imagine (image + video)
+│   │   ├── grok_client.py              ← xAI Grok Imagine REST (image + video)
+│   │   ├── grok_provider.py            ← Grok provider adapter
+│   │   ├── grok_text_client.py         ← xAI Grok chat-completions (text/JSON for parser + refiner)
+│   │   ├── grok_text_provider.py       ← Grok TextProvider adapter
+│   │   ├── openai_image_client.py      ← OpenAI gpt-image / dall-e
+│   │   ├── openai_image_provider.py    ← OpenAI image provider adapter
+│   │   ├── openai_video_client.py      ← OpenAI Sora 2 / Sora 2 Pro
+│   │   ├── openai_video_provider.py    ← OpenAI video provider adapter
+│   │   ├── openai_text_client.py       ← OpenAI chat-completions (text/JSON for parser + refiner)
+│   │   ├── openai_text_provider.py     ← OpenAI TextProvider adapter
+│   │   ├── claude_text_client.py       ← Anthropic /v1/messages (text/JSON; system as top-level field)
+│   │   ├── claude_text_provider.py     ← Claude TextProvider adapter
+│   │   ├── gemini_image_client.py      ← Google AI Studio: Gemini multimodal + Imagen with reference-image inlining
+│   │   ├── gemini_image_provider.py    ← Gemini provider adapter
 │   │   ├── voicebox_client.py          ← Voicebox local TTS server API
 │   │   ├── voicebox_provider.py        ← Voicebox provider (CPU-based voice cloning)
 │   │   ├── mlx_audio_provider.py       ← MLX-Audio/Chatterbox (Apple Silicon local TTS)
-│   │   ├── kling_client.py             ← Kling direct API for lip sync
+│   │   ├── kling_client.py             ← Kling direct API for lip sync — rate-limited at 2/min, 60s flat 429 backoff
 │   │   ├── kling_provider.py           ← Kling provider adapter
 │   │   └── reframe_client.py           ← Qwen Image Edit via HuggingFace Gradio
-│   ├── pipeline/                       ← Generation pipeline modules
-│   │   ├── image_gen.py                ← Image generation + prompt building
-│   │   ├── video_gen.py                ← Video generation + motion prompts + duration estimation
-│   │   ├── voice_gen.py                ← Voice cloning + dialogue TTS
-│   │   ├── lipsync.py                  ← Lip-sync generation pipeline
-│   │   └── timeline_assembler.py       ← DaVinci Resolve timeline construction
-│   └── ui/                             ← Python UI components (for wizard pages)
-│       ├── __init__.py
-│       ├── wizard.py                   ← 10-step wizard controller
-│       ├── pages.py                    ← Page builders for each wizard step
-│       └── components.py               ← Reusable UI widgets
+│   └── pipeline/                       ← Generation pipeline modules
+│       ├── image_gen.py                ← Image gen — char_refs threaded end-to-end, **provider_kwargs passthrough
+│       ├── video_gen.py                ← Video gen — duration snapping (5/10s) + per-model payload schema
+│       ├── prompt_refiner.py           ← LLM-driven still-vs-motion prompt split, caches to refined_prompts.json
+│       ├── shot_expansion.py           ← LLM-driven shot expansion (more coverage from a single action beat)
+│       ├── voice_gen.py                ← Voice cloning + dialogue TTS
+│       ├── audio_merge.py              ← Per-shot audio merging
+│       ├── lipsync.py                  ← Lip-sync generation pipeline
+│       └── timeline_assembler.py       ← DaVinci Resolve timeline construction
 └── .gitignore
 ```
 
@@ -168,30 +210,43 @@ provider.download_image(result, save_path="/path/to/output.jpg")
 
 ---
 
-## The 10-Step Wizard (ScriptToScreen.lua)
+## The 12-Step Wizard (ScriptToScreen.lua)
 
 The main wizard guides users through the full pipeline:
 
 | Step | Name | What Happens |
 |------|------|-------------|
-| 1 | Welcome | Provider configuration (API keys, server URLs, test buttons) |
-| 2 | Script Import | Load .fountain or .pdf screenplay file |
-| 3 | Shot Review | Review parsed scenes/shots, edit prompts before generation |
-| 4 | Character Setup | Assign reference images to characters |
-| 5 | Image Generation | Generate images for all shots (with progress bar) |
-| 6 | Import Images | Import generated images to Resolve media pool bins |
-| 7 | Video Generation | Generate videos from images + motion prompts |
-| 8 | Dialogue Generation | Voice assignment, TTS for all dialogue lines |
-| 9 | Lip Sync | Generate lip-synced video from video + audio pairs |
-| 10 | Timeline Assembly | Build Resolve timeline with all media |
+| 1 | Welcome | Provider configuration (API keys, server URLs, Test buttons) per category — image / video / voice / lip-sync |
+| 2 | Script | Load .fountain or .pdf, pick parser (heuristic / Claude / GPT-4o / Grok), enter the LLM key if applicable, click Parse |
+| 3 | Characters | Assign reference images to characters; auto-loads from a per-character library across projects |
+| 4 | Style | Style reference image, aspect ratio, creative-detail slider, "Refine prompts with LLM" toggle, per-provider model dropdowns (Mystic style / Freepik API / OpenAI model+quality+size+format+background / Gemini model) — all conditionally hidden based on the Step-1 image provider |
+| 5 | Review Image Prompts | Per-shot editable prompt tree; user can approve all, edit individually, or skip |
+| 6 | Image Generation | Generate All Images / Regenerate Selected / Retry Failed, with per-shot Re-roll Provider+Model dropdowns |
+| 7 | Review Video Prompts | Same as Step 5 but for motion prompts |
+| 8 | Video Generation | Generate All Videos / Regenerate Selected, with re-roll combos. Sora-* models auto-route to OpenAI regardless of saved videoProvider |
+| 9 | Voices | Per-character voice assignment (stock voice or upload-to-clone for ElevenLabs; voice sample per character for local TTS) |
+| 10 | Dialogue | TTS every dialogue line, merge per-shot audio |
+| 11 | LipSync | Per-shot video+audio → Kling lip-sync (rate-limited at 2/min) |
+| 12 | Assembly | Build Resolve timeline from synced clips |
 
 ### Wizard UI Header Bar
 The wizard has a persistent header showing:
-- Current step indicator: `1/10: Welcome`
+- Current step indicator: `1/12: Welcome`
 - Episode number field: `Ep: [1]`
 - Episode title field: `Title: [Origins]`
 
-These values feed `buildEpisodePrefix()` for bin organization.
+These values feed `buildEpisodePrefix()` for bin organization (e.g. `Ep1 - Origins`).
+
+### Layout pattern for conditionally-hidden rows
+Step 4 has 13 conditionally-hidden rows (Mystic-only, OpenAI-only,
+Gemini-only). Each is declared `Hidden = true` AT CONSTRUCTION; the
+visibility logic in `refreshProviderControls()` then only ever
+*shows* rows — never hides them post-init. This is one-directional
+visibility logic, which Fusion's UI engine handles reliably; the
+two-directional version (default visible, hide what's irrelevant)
+caused three separate "Browse button doesn't work" regressions
+because Fusion didn't always reflow when a row's `Hidden` flipped
+false→true after the page was realized.
 
 ---
 
@@ -199,19 +254,20 @@ These values feed `buildEpisodePrefix()` for bin organization.
 
 Each tool is a separate Lua script that can be launched independently from the STS Toolbar.
 
-### STS_Reprompt_Image.lua
-- **Purpose:** Regenerate a single image with an edited prompt
-- **Input:** Selected clip in media pool or timeline
-- **Manifest lookup:** Retrieves original prompt, style refs, character refs
-- **UI:** Prompt text area, style reference path, character ref grid, provider dropdown
+### STS_Reprompt_Image.lua  (Generate / Reprompt — dual mode)
+- **Purpose:** Regenerate a selected clip's image with an edited prompt, OR generate a brand-new image when no clip is selected
+- **Input:** Selected clip in media pool (optional)
+- **Manifest lookup:** When a clip is selected, retrieves original prompt, style refs, character refs
+- **UI:** Prompt text area, style reference path, character ref tree, provider dropdown, **per-provider Model dropdown** (Mystic style for Freepik, gpt-image-1/dall-e for OpenAI, Nano Banana variants for Gemini), Clear button to wipe pre-fills
 - **Output:** New image imported to `ScriptToScreen/{Ep}/S{N}/Images`
+- **Backend:** `script_to_screen.standalone.reprompt_image` accepts `**provider_kwargs` so the per-provider model id flows through to `provider.generate_image()` without the function knowing about each provider's flavors
 
-### STS_Reprompt_Video.lua
-- **Purpose:** Regenerate a single video with edited prompt/duration
-- **Input:** Selected clip in media pool or timeline
-- **Manifest lookup:** Retrieves original prompt, start image, duration, provider settings
-- **UI:** Prompt text area, duration override, provider dropdown
+### STS_Reprompt_Video.lua  (Generate / Reprompt — dual mode)
+- **Purpose:** Regenerate or generate a video; pick start image from disk + motion prompt + provider+model
+- **Manifest lookup:** When a clip is selected, retrieves original prompt, start image, duration, provider settings
+- **UI:** Prompt text area, start-image path picker, duration override, provider dropdown, **per-provider Model dropdown** (Kling/Seedance/MiniMax/Wan for Freepik, Sora 2/Sora 2 Pro for OpenAI), Clear button
 - **Output:** New video imported to `ScriptToScreen/{Ep}/S{N}/Videos`
+- **Backend:** `standalone.reprompt_video` accepts `**provider_kwargs` for the same passthrough pattern
 
 ### STS_Generate_Audio.lua
 - **Purpose:** Generate TTS dialogue for a shot
@@ -240,8 +296,79 @@ Each tool is a separate Lua script that can be launched independently from the S
 
 ### STS_Toolbar.lua
 - **Purpose:** Persistent floating toolbar with buttons for all tools
-- **Layout:** Groups: Main (Full Wizard), Reprompt (Image, Video), Generate (Audio, Lip Sync, Reframe Shot), Reference (Script Reference)
+- **Layout:** Groups: Main (Full Wizard), Generate / Reprompt (Image, Video), Generate (Audio, Lip Sync, Reframe Shot), Reference (Script Reference)
 - **Launch method:** `comp:Execute()` with `dofile()` for each tool
+- **Sizing:** Window declared at 200×600px so the full button set + section labels fit without clipping. The previous 420px clipped the bottom row.
+
+---
+
+## LLM Parser & Prompt Refiner
+
+Two opt-in modules that route screenplay processing through any
+configured TextProvider (Grok / Claude / OpenAI). Both produce
+output that's structurally identical to the deterministic
+heuristics, so downstream pipeline code is untouched.
+
+### parsing/llm_parser.py
+
+`parse_with_llm(raw_text, text_provider, *, title, model, max_tokens)`
+sends the raw screenplay text plus a strict system prompt that
+specifies the exact JSON shape the model must return:
+
+```
+{
+  "title": str,
+  "scenes": [
+    {"index", "heading", "location_type", "location", "time_of_day",
+     "action_description", "shots": [{"shot_type", "description",
+     "characters_present"}], "dialogue": [{"character", "text",
+     "parenthetical", "shot_index"}]}
+  ],
+  "characters": {"<NAME>": {"dialogue_count"}}
+}
+```
+
+Defends against hallucination: shot_index values are clamped into
+`[0, len(scene.shots)-1]`, missing dialogue is skipped, missing
+shots fall back to a single UNSPECIFIED shot synthesized from the
+scene action so downstream iteration never skips a scene. Backfills
+character dialogue_counts from actual scene dialogue if the LLM
+under-counted.
+
+The wizard's Step-2 dropdown picks between heuristic and the three
+LLM options. The Parse handler reads the API key from the on-page
+field (so the user can paste it without pressing Next first), saves
+it to `config.providers.<id>.apiKey`, and routes the raw text
+through `pdfplumber` (PDF) or `read()` (.fountain / .txt) before
+calling `parse_with_llm`.
+
+### pipeline/prompt_refiner.py
+
+`refine_screenplay_prompts(screenplay, text_provider)` produces
+two prompts per shot:
+
+- **Image prompt** — describes a frozen instant. Hard rule in the
+  system prompt: NO camera-motion verbs (pan, push-in, dolly, zoom,
+  follow, track, rotate). Length 1-3 sentences, ~40-120 words.
+- **Motion prompt** — describes what happens over the next few
+  seconds. Camera move + character action + dialogue text in
+  quotes (for lip-sync timing). Length 1-2 sentences.
+
+`get_refined_prompts(screenplay, output_dir, *, text_provider, use_cache=True)`
+wraps the above with on-disk caching at
+`<output_dir>/refined_prompts.json`. Cache invalidates when shot
+keys drift (re-parse with different results); the wizard's
+GenAllImages handler runs the refinement; GenAllVideos reads the
+cached file. So image and motion prompts stay consistent for a
+given batch.
+
+Wizard wiring: Step 4's "Refine prompts with LLM" checkbox is
+read by both GenAllImages and GenAllVideos handlers. When ticked,
+they pick the parser provider when LLM (already validated to have
+a key on Step 2), or fall back to whichever LLM has a key
+configured. The refined prompts are merged into `custom_prompts`
+just before submission — user overrides from Step 5/7 review pages
+still win.
 
 ---
 
