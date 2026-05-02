@@ -178,11 +178,22 @@ function JSON.encode(val)
         -- Object
         local items = {}
         for k, v in pairs(val) do
-            table.insert(items, '"' .. tostring(k) .. '":' .. JSON.encode(v))
+            table.insert(items, JSON.encode(tostring(k)) .. ":" .. JSON.encode(v))
         end
         return "{" .. table.concat(items, ",") .. "}"
     end
     return "null"
+end
+
+-- Safely embed a Lua string as a single-quoted Python string literal.
+-- Important: JSON payloads often contain escaped quotes (\"). If we only
+-- escape apostrophes, Python consumes the backslash before json.loads() sees
+-- it, producing invalid JSON like "... "party," ...". Doubling backslashes
+-- preserves JSON escapes across the Lua -> generated Python boundary.
+local function pyStringLiteral(s)
+    s = tostring(s or "")
+    s = s:gsub('\\', '\\\\'):gsub("'", "\\'"):gsub('\n', '\\n'):gsub('\r', '\\r')
+    return "'" .. s .. "'"
 end
 
 -- Convert any value to a safe display string. Used in error-message
@@ -2840,8 +2851,8 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        screenplay = parse_pdf(script_path)\n'
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
-        .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
-        .. '    character_text_prompts = json.loads(\'' .. charPromptJson:gsub("'", "\\'") .. '\')\n'
+        .. '    char_images = json.loads(' .. pyStringLiteral(charImgJson) .. ')\n'
+        .. '    character_text_prompts = json.loads(' .. pyStringLiteral(charPromptJson) .. ')\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
@@ -2872,7 +2883,7 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        openai_background="' .. (config.openaiBackground or "auto") .. '",\n'
         .. '    )\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
-        .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
+        .. '    custom_prompts = json.loads(' .. pyStringLiteral(overridesJson("image")) .. ')\n'
         -- Optional: LLM prompt refinement before image gen. The cache
         -- file under output_dir/refined_prompts.json is shared with the
         -- video-gen handler so motion prompts stay consistent.
@@ -3120,7 +3131,7 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '        screenplay = parse_pdf(script_path)\n'
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
-        .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
+        .. '    char_images = json.loads(' .. pyStringLiteral(charImgJson) .. ')\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
@@ -3145,8 +3156,8 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '        openai_output_format="' .. (config.openaiOutputFormat or "png") .. '",\n'
         .. '        openai_background="' .. (config.openaiBackground or "auto") .. '")\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
-        .. '    failed_keys = set(json.loads(\'' .. failedKeysJson:gsub("'", "\\'") .. '\'))\n'
-        .. '    custom_prompts = json.loads(\'' .. overridesJson("image"):gsub("'", "\\'") .. '\')\n'
+        .. '    failed_keys = set(json.loads(' .. pyStringLiteral(failedKeysJson) .. '))\n'
+        .. '    custom_prompts = json.loads(' .. pyStringLiteral(overridesJson("image")) .. ')\n'
         .. '    paths = {}\n'
         .. '    errors = []\n'
         .. '    for scene in screenplay.scenes:\n'
@@ -3401,7 +3412,7 @@ function win.On.RegenImage.Clicked(ev)
         .. '        screenplay = parse_pdf(script_path)\n'
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
-        .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
+        .. '    char_images = json.loads(' .. pyStringLiteral(charImgJson) .. ')\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
@@ -3908,7 +3919,7 @@ function win.On.GenAllVideos.Clicked(ev)
         .. '        if m:\n'
         .. '            key = m.group(1)\n'
         .. '            image_paths[key] = f  # newest mtime wins\n'
-        .. '    custom_prompts = json.loads(\'' .. overridesJson("video"):gsub("'", "\\'") .. '\')\n'
+        .. '    custom_prompts = json.loads(' .. pyStringLiteral(overridesJson("video")) .. ')\n'
         -- Optional refinement: prefer the cache image-gen wrote so motion
         -- prompts match the still prompts; falls back to a fresh refine
         -- if the cache is missing or stale.
@@ -4306,7 +4317,7 @@ function win.On.GenAllDialogue.Clicked(ev)
         .. '        screenplay = parse_pdf(script_path)\n'
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
-        .. '    voice_ids = json.loads(\'' .. voiceJson:gsub("'", "\\'") .. '\')\n'
+        .. '    voice_ids = json.loads(' .. pyStringLiteral(voiceJson) .. ')\n'
         .. '    for name, vid in voice_ids.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].voice_id = vid\n'
