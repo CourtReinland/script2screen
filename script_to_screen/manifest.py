@@ -225,6 +225,7 @@ def update_character(
     project_slug: str,
     name: str,
     reference_image_path: Optional[str] = None,
+    visual_prompt: Optional[str] = None,
     voice_id: Optional[str] = None,
     voice_provider: Optional[str] = None,
     voice_samples: Optional[list[str]] = None,
@@ -234,6 +235,8 @@ def update_character(
     char = m["characters"].get(name, {})
     if reference_image_path is not None:
         char["reference_image_path"] = reference_image_path
+    if visual_prompt is not None:
+        char["visual_prompt"] = visual_prompt
     if voice_id is not None:
         char["voice_id"] = voice_id
     if voice_provider is not None:

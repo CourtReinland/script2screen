@@ -35,6 +35,16 @@ sudo cp "$SCRIPT_DIR/ScriptToScreen.lua" "$RESOLVE_SCRIPTS/"
 sudo chown "$(whoami):staff" "$RESOLVE_SCRIPTS/ScriptToScreen.lua"
 sudo chmod 755 "$RESOLVE_SCRIPTS/ScriptToScreen.lua"
 
+# Also install toolbar/common scripts used to launch the main wizard and standalone tools
+for script in STS_Common.lua STS_Toolbar.lua; do
+    if [ -f "$SCRIPT_DIR/$script" ]; then
+        sudo cp "$SCRIPT_DIR/$script" "$RESOLVE_SCRIPTS/"
+        sudo chown "$(whoami):staff" "$RESOLVE_SCRIPTS/$script"
+        sudo chmod 755 "$RESOLVE_SCRIPTS/$script"
+        echo "  [OK] $script"
+    fi
+done
+
 # Also install Python entry point for external scripting
 if [ -f "$SCRIPT_DIR/ScriptToScreen.py" ]; then
     sudo cp "$SCRIPT_DIR/ScriptToScreen.py" "$RESOLVE_SCRIPTS/"
@@ -46,7 +56,7 @@ fi
 EDIT_SCRIPTS="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
 echo "Installing standalone tools to $EDIT_SCRIPTS..."
 sudo mkdir -p "$EDIT_SCRIPTS"
-for script in STS_Common.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua; do
+for script in STS_Common.lua STS_Toolbar.lua STS_Reprompt_Image.lua STS_Reprompt_Video.lua STS_Generate_Audio.lua STS_Lip_Sync.lua STS_ReframeShot.lua STS_ScriptRef.lua; do
     if [ -f "$SCRIPT_DIR/$script" ]; then
         sudo cp "$SCRIPT_DIR/$script" "$EDIT_SCRIPTS/"
         sudo chown "$(whoami):staff" "$EDIT_SCRIPTS/$script"

@@ -96,7 +96,8 @@ ScriptToScreen/                         ← Git repo root (github.com/CourtReinl
 │   │   ├── kling_provider.py           ← Kling provider adapter
 │   │   └── reframe_client.py           ← Qwen Image Edit via HuggingFace Gradio
 │   └── pipeline/                       ← Generation pipeline modules
-│       ├── image_gen.py                ← Image gen — char_refs threaded end-to-end, **provider_kwargs passthrough
+│       ├── image_gen.py                ← Image gen — char_refs + prompt-mode characters threaded end-to-end, **provider_kwargs passthrough**
+│       ├── character_prompts.py        ← Editable character text prompt generation (LLM + fallback)
 │       ├── video_gen.py                ← Video gen — duration snapping (5/10s) + per-model payload schema
 │       ├── prompt_refiner.py           ← LLM-driven still-vs-motion prompt split, caches to refined_prompts.json
 │       ├── shot_expansion.py           ← LLM-driven shot expansion (more coverage from a single action beat)
@@ -218,7 +219,7 @@ The main wizard guides users through the full pipeline:
 |------|------|-------------|
 | 1 | Welcome | Provider configuration (API keys, server URLs, Test buttons) per category — image / video / voice / lip-sync |
 | 2 | Script | Load .fountain or .pdf, pick parser (heuristic / Claude / GPT-4o / Grok), enter the LLM key if applicable, click Parse |
-| 3 | Characters | Assign reference images to characters; auto-loads from a per-character library across projects |
+| 3 | Characters | Assign reference images or editable AI-generated text prompts to characters; auto-loads reference images from a per-character library across projects |
 | 4 | Style | Style reference image, aspect ratio, creative-detail slider, "Refine prompts with LLM" toggle, per-provider model dropdowns (Mystic style / Freepik API / OpenAI model+quality+size+format+background / Gemini model) — all conditionally hidden based on the Step-1 image provider |
 | 5 | Review Image Prompts | Per-shot editable prompt tree; user can approve all, edit individually, or skip |
 | 6 | Image Generation | Generate All Images / Regenerate Selected / Retry Failed, with per-shot Re-roll Provider+Model dropdowns |
@@ -551,8 +552,9 @@ def find_or_create(parent, name):
 ### Python Pipeline
 | Module | Key Function | Purpose |
 |--------|-------------|---------|
-| `image_gen.py` | `generate_images_for_screenplay()` | Generate all shot images |
+| `image_gen.py` | `generate_images_for_screenplay()` | Generate all shot images; concatenates prompt-mode character descriptions into shot prompts |
 | `image_gen.py` | `build_image_prompt(shot, scene)` | Construct detailed image prompt |
+| `character_prompts.py` | `generate_character_prompts()` | Generate editable character visual prompts via xAI/Grok when configured, with deterministic fallback |
 | `video_gen.py` | `generate_videos_for_screenplay()` | Generate all shot videos |
 | `video_gen.py` | `build_motion_prompt(shot, scene)` | Construct motion/animation prompt |
 | `video_gen.py` | `_estimate_duration(shot, scene)` | Estimate video duration from dialogue/action |

@@ -443,6 +443,8 @@ local config = {
 
 local screenplayData = nil -- parsed screenplay (Lua table from JSON)
 local characterImages = {} -- characterName -> imagePath
+local characterPrompts = {} -- characterName -> editable text-to-image visual prompt
+local characterModes = {} -- characterName -> "image" or "prompt"
 local characterVoices = {} -- characterName -> voiceId
 local generatedImages = {} -- shotKey (s{N}_sh{M}) -> imagePath
 local failedImages = {}    -- shotKey (s{N}_sh{M}) -> error message
@@ -856,13 +858,17 @@ local win = disp:AddWindow({
             -- ========================
             ui:VGroup{
                 ID = "CharPage",
-                ui:Label{Text = "<h3>Character Setup</h3><p>Assign a reference image for each character.</p>", Alignment = {AlignHCenter = true}},
-                ui:Tree{ID = "CharTree", HeaderHidden = false, MinimumSize = {500, 250}},
+                ui:Label{Text = "<h3>Character Setup</h3><p>For each character, choose either a reference image or an editable AI text prompt. Text prompts are concatenated into each shot prompt alongside the Step 4 style reference.</p>", Alignment = {AlignHCenter = true}},
+                ui:Tree{ID = "CharTree", HeaderHidden = false, MinimumSize = {500, 210}},
                 ui:HGroup{
-                    ui:Button{ID = "BrowseCharImg", Text = "Set Image for Selected", Weight = 0.3},
-                    ui:Button{ID = "ClearCharImg", Text = "Clear", Weight = 0.15},
-                    ui:Label{Text = "", Weight = 0.55},
+                    ui:Button{ID = "BrowseCharImg", Text = "Use Image for Selected", Weight = 0.25},
+                    ui:Button{ID = "UseCharPrompt", Text = "Use Text Prompt", Weight = 0.2},
+                    ui:Button{ID = "RefreshCharPrompt", Text = "Generate/Refresh Prompt", Weight = 0.25},
+                    ui:Button{ID = "ClearCharImg", Text = "Clear", Weight = 0.1},
+                    ui:Label{Text = "", Weight = 0.2},
                 },
+                ui:Label{Text = "Editable visual prompt for selected character:"},
+                ui:TextEdit{ID = "CharPromptEdit", PlaceholderText = "Select a character to edit or generate their text-to-image prompt...", MinimumSize = {400, 85}},
                 ui:VGap(0, 0.5),
                 ui:HGroup{
                     ui:Label{Text = "", Weight = 0.55},
@@ -2286,6 +2292,11 @@ function win.On.ParseScript.Clicked(ev)
 
     -- Escape backslashes and quotes in path for Python string literal
     local safePath = path:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local grokPromptKey = config.providers.grok.apiKey or ""
+    if itm.ImageProviderCombo and getImageProviderId(itm.ImageProviderCombo.CurrentIndex) == "grok" then
+        grokPromptKey = itm.ImageApiKey.Text or grokPromptKey
+    end
+    local safeGrokPromptKey = grokPromptKey:gsub("\\", "\\\\"):gsub('"', '\\"')
 
     -- Stash the LLM key in a tempfile so it doesn't appear in the
     -- Resolve Console / Lua source if the script is logged on error.
@@ -2342,6 +2353,12 @@ function win.On.ParseScript.Clicked(ev)
         .. '    }\n'
         .. '    for name, char in screenplay.characters.items():\n'
         .. '        data["characters"][name] = {"lines": char.dialogue_count}\n'
+        .. '    try:\n'
+        .. '        from script_to_screen.pipeline.character_prompts import generate_character_prompts\n'
+        .. '        data["character_prompts"] = generate_character_prompts(screenplay, api_key="' .. safeGrokPromptKey .. '")\n'
+        .. '    except Exception as _prompt_err:\n'
+        .. '        data["character_prompts"] = {}\n'
+        .. '        data["character_prompt_error"] = str(_prompt_err)\n'
         .. '    for scene in screenplay.scenes:\n'
         .. '        shot_list = []\n'
         .. '        for si, shot in enumerate(scene.shots):\n'
@@ -2441,55 +2458,120 @@ end
 -- STEP 3: Character Setup
 -- ============================================================
 
+local function syncSelectedCharacterPrompt()
+    local selected = itm.CharTree:CurrentItem()
+    if not selected then return nil end
+    local charName = selected.Text[0]
+    if itm.CharPromptEdit then
+        local edited = itm.CharPromptEdit.PlainText or ""
+        if edited ~= "" then
+            characterPrompts[charName] = edited
+            if characterModes[charName] ~= "image" then
+                characterModes[charName] = "prompt"
+            end
+        end
+    end
+    return charName
+end
+
+local function selectedCharacterName()
+    local selected = itm.CharTree:CurrentItem()
+    if not selected then return nil end
+    return selected.Text[0]
+end
+
+local function refreshCharacterRow(charName)
+    if not charName then return end
+    for i = 0, itm.CharTree:TopLevelItemCount() - 1 do
+        local item = itm.CharTree:TopLevelItem(i)
+        if item and item.Text[0] == charName then
+            local mode = characterModes[charName] or "prompt"
+            item.Text[2] = (mode == "image") and "Image" or "Text Prompt"
+            if mode == "image" then
+                item.Text[3] = characterImages[charName] or "(none)"
+            else
+                local prompt = characterPrompts[charName] or ""
+                if #prompt > 110 then prompt = prompt:sub(1, 107) .. "..." end
+                item.Text[3] = prompt ~= "" and prompt or "(generate or edit prompt)"
+            end
+            break
+        end
+    end
+end
+
 function populateCharacterTree(data)
     if not data or not data.characters then return end
+
+    if data.character_prompts then
+        for name, prompt in pairs(data.character_prompts) do
+            if not characterPrompts[name] or characterPrompts[name] == "" then
+                characterPrompts[name] = prompt
+            end
+        end
+    end
 
     local hdr = itm.CharTree:NewItem()
     hdr.Text[0] = "Character"
     hdr.Text[1] = "Lines"
-    hdr.Text[2] = "Reference Image"
+    hdr.Text[2] = "Mode"
+    hdr.Text[3] = "Reference Image / Text Prompt"
     itm.CharTree:SetHeaderItem(hdr)
-    itm.CharTree.ColumnCount = 3
-    itm.CharTree.ColumnWidth[0] = 150
-    itm.CharTree.ColumnWidth[1] = 60
-    itm.CharTree.ColumnWidth[2] = 300
+    itm.CharTree.ColumnCount = 4
+    itm.CharTree.ColumnWidth[0] = 140
+    itm.CharTree.ColumnWidth[1] = 55
+    itm.CharTree.ColumnWidth[2] = 95
+    itm.CharTree.ColumnWidth[3] = 430
 
     itm.CharTree:Clear()
     local libraryHits = 0
     for name, info in pairs(data.characters) do
+        if not characterModes[name] then characterModes[name] = characterImages[name] and "image" or "prompt" end
         local item = itm.CharTree:NewItem()
         item.Text[0] = name
         item.Text[1] = tostring(info.lines)
-
-        -- If the user hasn't set a ref image for this character yet in
-        -- this project, try the global library for recurring characters.
-        if not characterImages[name] or characterImages[name] == "" then
+        -- If the user hasn't chosen a mode yet, try the global library for
+        -- recurring characters before falling back to editable prompt mode.
+        if (not characterImages[name] or characterImages[name] == "") and not characterModes[name] then
             local libPath, libEntry = lookupCharacterLibrary(name)
             if libPath then
                 characterImages[name] = libPath
+                characterModes[name] = "image"
                 libraryHits = libraryHits + 1
             end
         end
+        if not characterModes[name] then characterModes[name] = characterImages[name] and "image" or "prompt" end
 
-        local currentPath = characterImages[name]
-        if currentPath and currentPath ~= "" then
-            -- Check if this came from the library and tag it visually
-            local libPath = lookupCharacterLibrary(name)
-            if libPath == currentPath then
-                item.Text[2] = currentPath .. "  (from library)"
+        local mode = characterModes[name] or "prompt"
+        item.Text[2] = (mode == "image") and "Image" or "Text Prompt"
+        if mode == "image" then
+            local currentPath = characterImages[name]
+            if currentPath and currentPath ~= "" then
+                local libPath = lookupCharacterLibrary(name)
+                if libPath == currentPath then
+                    item.Text[3] = currentPath .. "  (from library)"
+                else
+                    item.Text[3] = currentPath
+                end
             else
-                item.Text[2] = currentPath
+                item.Text[3] = "(none)"
             end
         else
-            item.Text[2] = "(none)"
+            local prompt = characterPrompts[name] or ""
+            if #prompt > 110 then prompt = prompt:sub(1, 107) .. "..." end
+            item.Text[3] = prompt ~= "" and prompt or "(generate or edit prompt)"
         end
-
         itm.CharTree:AddTopLevelItem(item)
     end
 
     if libraryHits > 0 then
         print(string.format("[ScriptToScreen] Auto-loaded %d character reference(s) from library", libraryHits))
     end
+end
+
+function win.On.CharTree.ItemClicked(ev)
+    local charName = selectedCharacterName()
+    if not charName then return end
+    itm.CharPromptEdit.PlainText = characterPrompts[charName] or ""
 end
 
 function win.On.BrowseCharImg.Clicked(ev)
@@ -2508,7 +2590,8 @@ function win.On.BrowseCharImg.Clicked(ev)
     end
     if path and path ~= "" then
         characterImages[charName] = path
-        selected.Text[2] = path
+        characterModes[charName] = "image"
+        refreshCharacterRow(charName)
         -- Persist to the global library so future projects with the same
         -- character name auto-populate this ref image.
         updateCharacterLibrary(charName, path)
@@ -2516,15 +2599,64 @@ function win.On.BrowseCharImg.Clicked(ev)
     end
 end
 
+function win.On.UseCharPrompt.Clicked(ev)
+    local charName = syncSelectedCharacterPrompt()
+    if not charName then return end
+    characterModes[charName] = "prompt"
+    refreshCharacterRow(charName)
+end
+
+function win.On.RefreshCharPrompt.Clicked(ev)
+    local charName = selectedCharacterName()
+    if not charName or (itm.ScriptPath.Text or "") == "" then return end
+    itm.CharPromptEdit.PlainText = "Generating prompt for " .. charName .. "..."
+
+    local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local grokKey = config.providers.grok.apiKey or ""
+    if itm.ImageProviderCombo and getImageProviderId(itm.ImageProviderCombo.CurrentIndex) == "grok" then
+        grokKey = itm.ImageApiKey.Text or grokKey
+    end
+    local safeKey = grokKey:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local safeName = charName:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local code = 'import json, traceback\n'
+        .. 'try:\n'
+        .. '    script_path = "' .. safePath .. '"\n'
+        .. '    if script_path.lower().endswith(".pdf"):\n'
+        .. '        from script_to_screen.parsing.pdf_parser import parse_pdf\n'
+        .. '        screenplay = parse_pdf(script_path)\n'
+        .. '    else:\n'
+        .. '        from script_to_screen.parsing.fountain_parser import parse_fountain\n'
+        .. '        screenplay = parse_fountain(script_path)\n'
+        .. '    from script_to_screen.pipeline.character_prompts import generate_character_prompt\n'
+        .. '    prompt = generate_character_prompt(screenplay, "' .. safeName .. '", api_key="' .. safeKey .. '")\n'
+        .. '    print(json.dumps({"prompt": prompt}))\n'
+        .. 'except Exception as e:\n'
+        .. '    print(json.dumps({"error": str(e), "trace": traceback.format_exc()}))\n'
+
+    local result = runPython(code)
+    local jsonStr = result and result:match("(%{.+%})")
+    if jsonStr then
+        local data = JSON.decode(jsonStr)
+        if data and data.prompt then
+            characterPrompts[charName] = data.prompt
+            characterModes[charName] = "prompt"
+            itm.CharPromptEdit.PlainText = data.prompt
+            refreshCharacterRow(charName)
+        elseif data and data.error then
+            itm.CharPromptEdit.PlainText = "Prompt generation failed: " .. data.error
+        end
+    end
+end
+
 -- Clear removes the ref image from THIS project only.
 -- The library entry is kept so other projects can still use it.
 -- (Users who want to remove from the library can overwrite with a new image.)
 function win.On.ClearCharImg.Clicked(ev)
-    local selected = itm.CharTree:CurrentItem()
-    if not selected then return end
-    local charName = selected.Text[0]
+    local charName = selectedCharacterName()
+    if not charName then return end
     characterImages[charName] = nil
-    selected.Text[2] = "(none)"
+    characterModes[charName] = "prompt"
+    refreshCharacterRow(charName)
 end
 
 -- ============================================================
@@ -2560,6 +2692,7 @@ end
 -- ============================================================
 
 function win.On.GenAllImages.Clicked(ev)
+    syncSelectedCharacterPrompt()
     local imgPid = config.imageProvider
     -- Check provider is configured
     if imgPid == "freepik" and (config.providers.freepik.apiKey or "") == "" then
@@ -2664,14 +2797,25 @@ function win.On.GenAllImages.Clicked(ev)
 
     local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
-    -- Build character images JSON
+    -- Build character images JSON (only for characters explicitly set to image mode)
     local charImgParts = {}
     for name, imgPath in pairs(characterImages) do
-        local safeName = name:gsub('"', '\\"')
-        local safeImg = imgPath:gsub("\\", "\\\\"):gsub('"', '\\"')
-        table.insert(charImgParts, '"' .. safeName .. '":"' .. safeImg .. '"')
+        if characterModes[name] == "image" then
+            local safeName = name:gsub('"', '\\"')
+            local safeImg = imgPath:gsub("\\", "\\\\"):gsub('"', '\\"')
+            table.insert(charImgParts, '"' .. safeName .. '":"' .. safeImg .. '"')
+        end
     end
     local charImgJson = "{" .. table.concat(charImgParts, ",") .. "}"
+
+    -- Build character text prompts JSON (only for prompt-mode characters)
+    local charPromptPayload = {}
+    for name, prompt in pairs(characterPrompts) do
+        if characterModes[name] ~= "image" and prompt and prompt ~= "" then
+            charPromptPayload[name] = prompt
+        end
+    end
+    local charPromptJson = JSON.encode(charPromptPayload)
 
     -- Derive project slug for manifest recording
     local projectSlugCode = 'import re\n'
@@ -2697,10 +2841,14 @@ function win.On.GenAllImages.Clicked(ev)
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
         .. '    char_images = json.loads(\'' .. charImgJson:gsub("'", "\\'") .. '\')\n'
+        .. '    character_text_prompts = json.loads(\'' .. charPromptJson:gsub("'", "\\'") .. '\')\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
         .. '            update_character(project_slug, name, reference_image_path=path)\n'
+        .. '    for name, prompt in character_text_prompts.items():\n'
+        .. '        if name in screenplay.characters:\n'
+        .. '            update_character(project_slug, name, visual_prompt=prompt)\n'
         .. '    api_key = open("' .. keyfile .. '").read().strip()\n'
         .. '    provider = create_image_provider(\n'
         .. '        "' .. imgPid .. '",\n'
@@ -2747,6 +2895,7 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        style_reference_path=style_path,\n'
         .. '        defaults=defaults,\n'
         .. '        custom_prompts=custom_prompts or None,\n'
+        .. '        character_text_prompts=character_text_prompts,\n' 
         .. '        project_slug=project_slug,\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'

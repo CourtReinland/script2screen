@@ -145,6 +145,7 @@ def generate_images_for_screenplay(
     defaults: Optional[GenerationDefaults] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     custom_prompts: Optional[dict[str, str]] = None,
+    character_text_prompts: Optional[dict[str, str]] = None,
     project_slug: Optional[str] = None,
 ) -> dict:
     """
@@ -189,6 +190,19 @@ def generate_images_for_screenplay(
             prompt = custom_prompts[shot_key]
         else:
             base_prompt = build_image_prompt(shot, scene, screenplay, shot_idx=shot_idx)
+            char_descriptions = []
+            for char_name in shot.characters_present:
+                char = screenplay.characters.get(char_name)
+                if not (char and char.reference_image_path) and character_text_prompts and character_text_prompts.get(char_name):
+                    char_descriptions.append(character_text_prompts[char_name].strip())
+
+            if char_descriptions:
+                base_prompt = (
+                    base_prompt
+                    + " Character visual descriptions: "
+                    + " ".join(d for d in char_descriptions if d)
+                )
+
             prompt = provider.build_prompt(base_prompt, char_refs)
 
         logger.info(f"[{shot_key}] Prompt: {prompt[:120]}...")
@@ -253,10 +267,19 @@ def generate_images_for_screenplay(
                     try:
                         from ..manifest import record_generated_image
                         char_refs_for_manifest = {}
+                        character_prompts_for_manifest = {}
                         for cn in shot.characters_present:
                             c = screenplay.characters.get(cn)
                             if c and c.reference_image_path:
                                 char_refs_for_manifest[cn] = c.reference_image_path
+                            elif character_text_prompts and character_text_prompts.get(cn):
+                                character_prompts_for_manifest[cn] = character_text_prompts[cn]
+                        provider_settings = {
+                            "model": defaults.freepik_model,
+                            "aspect_ratio": defaults.aspect_ratio,
+                        }
+                        if character_prompts_for_manifest:
+                            provider_settings["character_text_prompts"] = character_prompts_for_manifest
                         record_generated_image(
                             project_slug=project_slug,
                             filename=os.path.basename(actual_path),
@@ -264,10 +287,7 @@ def generate_images_for_screenplay(
                             shot_key=shot_key,
                             prompt=prompt,  # The actual prompt sent to the provider
                             provider=type(provider).__name__,
-                            provider_settings={
-                                "model": defaults.freepik_model,
-                                "aspect_ratio": defaults.aspect_ratio,
-                            },
+                            provider_settings=provider_settings,
                             style_reference_path=style_reference_path or "",
                             character_refs=char_refs_for_manifest,
                         )
