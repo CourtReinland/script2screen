@@ -146,6 +146,7 @@ def generate_images_for_screenplay(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     custom_prompts: Optional[dict[str, str]] = None,
     character_text_prompts: Optional[dict[str, str]] = None,
+    scene_style_reference_paths: Optional[dict[str, str]] = None,
     project_slug: Optional[str] = None,
 ) -> dict:
     """
@@ -170,6 +171,8 @@ def generate_images_for_screenplay(
         return {"_errors": ["No shots found in screenplay"]}
 
     logger.info(f"Generating images for {len(all_shots)} shots...")
+    if not isinstance(scene_style_reference_paths, dict):
+        scene_style_reference_paths = {}
     tracker = ProgressTracker(len(all_shots), progress_callback)
     results: dict[str, str] = {}
     errors: list[str] = []
@@ -206,11 +209,16 @@ def generate_images_for_screenplay(
             prompt = provider.build_prompt(base_prompt, char_refs)
 
         logger.info(f"[{shot_key}] Prompt: {prompt[:120]}...")
+        effective_style_reference_path = (
+            scene_style_reference_paths.get(str(scene.index))
+            or scene_style_reference_paths.get(scene.index)
+            or style_reference_path
+        )
 
         try:
             task_id = provider.generate_image(
                 prompt=prompt,
-                style_reference_path=style_reference_path,
+                style_reference_path=effective_style_reference_path,
                 # Per-shot character references — providers that support
                 # multimodal conditioning (Gemini) inline these as image
                 # parts; others ignore the kwarg.
@@ -288,7 +296,7 @@ def generate_images_for_screenplay(
                             prompt=prompt,  # The actual prompt sent to the provider
                             provider=type(provider).__name__,
                             provider_settings=provider_settings,
-                            style_reference_path=style_reference_path or "",
+                            style_reference_path=effective_style_reference_path or "",
                             character_refs=char_refs_for_manifest,
                         )
                     except Exception as e:

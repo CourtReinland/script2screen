@@ -457,6 +457,7 @@ local characterImages = {} -- characterName -> imagePath
 local characterPrompts = {} -- characterName -> editable text-to-image visual prompt
 local characterModes = {} -- characterName -> "image" or "prompt"
 local characterVoices = {} -- characterName -> voiceId
+local sceneStyleImages = {} -- scene.index -> style/set reference image path
 local generatedImages = {} -- shotKey (s{N}_sh{M}) -> imagePath
 local failedImages = {}    -- shotKey (s{N}_sh{M}) -> error message
 local generatedVideos = {} -- shotKey (s{N}_sh{M}) -> videoPath
@@ -894,12 +895,20 @@ local win = disp:AddWindow({
             -- ========================
             ui:VGroup{
                 ID = "StylePage",
-                ui:Label{Text = "<h3>Style Reference</h3><p>Choose a style reference image and generation settings.</p>", Alignment = {AlignHCenter = true}},
+                ui:Label{Text = "<h3>Style / Set References</h3><p>Choose a global style reference, or assign scene-specific set references. When a scene has its own reference, image generation uses that image for every shot in that scene.</p>", Alignment = {AlignHCenter = true}},
                 ui:HGroup{
-                    ui:Label{Text = "Style Image:", Weight = 0.15},
-                    ui:LineEdit{ID = "StylePath", PlaceholderText = "Select style reference image...", ReadOnly = true, Weight = 0.6},
+                    ui:Label{Text = "Global Style Image:", Weight = 0.15},
+                    ui:LineEdit{ID = "StylePath", PlaceholderText = "Fallback style reference for scenes without their own image...", ReadOnly = true, Weight = 0.6},
                     ui:Button{ID = "BrowseStyle", Text = "Browse", Weight = 0.12},
                     ui:Button{ID = "ClearStyle", Text = "Clear", Weight = 0.12},
+                },
+                ui:Label{Text = "<b>Scene Set References</b>", StyleSheet = "padding-top: 8px;"},
+                ui:Tree{ID = "SceneStyleTree", HeaderHidden = false, MinimumSize = {500, 130}},
+                ui:HGroup{
+                    ui:Button{ID = "BrowseSceneStyle", Text = "Set Image for Selected Scene", Weight = 0.28},
+                    ui:Button{ID = "ClearSceneStyle", Text = "Clear Selected Scene", Weight = 0.22},
+                    ui:Button{ID = "ApplyGlobalStyleToScenes", Text = "Apply Global to Empty Scenes", Weight = 0.26},
+                    ui:Label{ID = "SceneStyleStatus", Text = "", Weight = 0.24},
                 },
                 ui:Label{Text = "<b>Generation Settings</b>", StyleSheet = "padding-top: 10px;"},
                 -- Freepik image API (which endpoint/model to hit).
@@ -1745,6 +1754,7 @@ local populateReviewTree
 -- silently no-op. Lua locals don't propagate backward in the same chunk.
 local populateImageTree
 local populateVideoTree
+local populateSceneStyleTree
 
 -- Same problem for overridesJson: referenced by GenAllImages /
 -- RetryFailedImages / GenAllVideos handlers (defined at ~L2200/2450/2743)
@@ -1767,6 +1777,7 @@ local function showStep(step)
     -- clean layout pass.
     if step == 4 then
         pcall(refreshProviderControls)
+        if screenplayData then pcall(populateSceneStyleTree) end
     end
     -- When entering Review Images (step 5) or Review Videos (step 7),
     -- ensure the review tree is populated from the current screenplay.
@@ -2694,6 +2705,70 @@ function win.On.ClearStyle.Clicked(ev)
     itm.StylePath.Text = ""
 end
 
+local function selectedSceneStyleIndex()
+    if not itm.SceneStyleTree then return nil end
+    local item = itm.SceneStyleTree.CurrentItem
+    if not item then return nil end
+    local idx = item.Text[0]
+    if idx and idx ~= "" and idx ~= "Scene" then return idx end
+    return nil
+end
+
+local function refreshSceneStyleStatus()
+    if not itm.SceneStyleStatus then return end
+    local n = 0
+    for _, path in pairs(sceneStyleImages or {}) do
+        if path and path ~= "" then n = n + 1 end
+    end
+    itm.SceneStyleStatus.Text = tostring(n) .. " scene refs"
+end
+
+function win.On.BrowseSceneStyle.Clicked(ev)
+    local sceneIdx = selectedSceneStyleIndex()
+    if not sceneIdx then
+        if itm.SceneStyleStatus then itm.SceneStyleStatus.Text = "Select a scene first" end
+        return
+    end
+    local ok, path = pcall(function()
+        return fu:RequestFile("Select Set / Style Reference for Scene " .. tostring(sceneIdx))
+    end)
+    if not ok then
+        print("[ScriptToScreen] BrowseSceneStyle error: " .. tostring(path))
+        return
+    end
+    if path and path ~= "" then
+        sceneStyleImages[tostring(sceneIdx)] = path
+        pcall(populateSceneStyleTree)
+    end
+end
+
+function win.On.ClearSceneStyle.Clicked(ev)
+    local sceneIdx = selectedSceneStyleIndex()
+    if not sceneIdx then
+        if itm.SceneStyleStatus then itm.SceneStyleStatus.Text = "Select a scene first" end
+        return
+    end
+    sceneStyleImages[tostring(sceneIdx)] = nil
+    pcall(populateSceneStyleTree)
+end
+
+function win.On.ApplyGlobalStyleToScenes.Clicked(ev)
+    local global = itm.StylePath.Text or ""
+    if global == "" then
+        if itm.SceneStyleStatus then itm.SceneStyleStatus.Text = "Choose global image first" end
+        return
+    end
+    if screenplayData and screenplayData.scenes then
+        for _, scene in ipairs(screenplayData.scenes) do
+            local idx = tostring(scene.index)
+            if not sceneStyleImages[idx] or sceneStyleImages[idx] == "" then
+                sceneStyleImages[idx] = global
+            end
+        end
+    end
+    pcall(populateSceneStyleTree)
+end
+
 function win.On.DetailSlider.ValueChanged(ev)
     itm.DetailValue.Text = tostring(itm.DetailSlider.Value)
 end
@@ -2738,6 +2813,13 @@ function win.On.GenAllImages.Clicked(ev)
     local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeStyle = itm.StylePath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local sceneStyleParts = {}
+    for sceneIdx, path in pairs(sceneStyleImages or {}) do
+        if path and path ~= "" then
+            table.insert(sceneStyleParts, JSON.encode(tostring(sceneIdx)) .. ":" .. JSON.encode(path))
+        end
+    end
+    local sceneStyleRefsJson = "{" .. table.concat(sceneStyleParts, ",") .. "}"
     local model = itm.ModelCombo.CurrentText or "realism"
     local aspect = itm.AspectCombo.CurrentText or "widescreen_16_9"
     local detail = itm.DetailSlider.Value or 33
@@ -2890,6 +2972,9 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        openai_background="' .. (config.openaiBackground or "auto") .. '",\n'
         .. '    )\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
+        .. '    scene_style_reference_paths = json.loads(' .. pyStringLiteral(sceneStyleRefsJson) .. ')\n'
+        .. '    if not isinstance(scene_style_reference_paths, dict):\n'
+        .. '        scene_style_reference_paths = {}\n'
         .. '    custom_prompts = json.loads(' .. pyStringLiteral(overridesJson("image")) .. ')\n'
         -- Optional: LLM prompt refinement before image gen. The cache
         -- file under output_dir/refined_prompts.json is shared with the
@@ -2914,6 +2999,7 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        defaults=defaults,\n'
         .. '        custom_prompts=custom_prompts or None,\n'
         .. '        character_text_prompts=character_text_prompts,\n' 
+        .. '        scene_style_reference_paths=scene_style_reference_paths,\n'
         .. '        project_slug=project_slug,\n'
         .. '    )\n'
         .. '    errs = results.pop("_errors", [])\n'
@@ -3102,6 +3188,14 @@ function win.On.RetryFailedImages.Clicked(ev)
     end
     local charImgJson = "{" .. table.concat(charImgParts, ",") .. "}"
 
+    local sceneStyleParts = {}
+    for sceneIdx, path in pairs(sceneStyleImages or {}) do
+        if path and path ~= "" then
+            table.insert(sceneStyleParts, JSON.encode(tostring(sceneIdx)) .. ":" .. JSON.encode(path))
+        end
+    end
+    local sceneStyleRefsJson = "{" .. table.concat(sceneStyleParts, ",") .. "}"
+
     -- Serialize the list of failed shot_keys as JSON
     local failedKeysParts = {}
     for _, sk in ipairs(failedList) do
@@ -3139,6 +3233,9 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
         .. '    char_images = json.loads(' .. pyStringLiteral(charImgJson) .. ')\n'
+        .. '    scene_style_reference_paths = json.loads(' .. pyStringLiteral(sceneStyleRefsJson) .. ')\n'
+        .. '    if not isinstance(scene_style_reference_paths, dict):\n'
+        .. '        scene_style_reference_paths = {}\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
@@ -3183,8 +3280,9 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '                    if ch and ch.reference_image_path:\n'
         .. '                        char_refs[c] = ch.reference_image_path\n'
         .. '                prompt = provider.build_prompt(prompt, char_refs)\n'
+        .. '                effective_style_path = scene_style_reference_paths.get(str(scene.index)) or scene_style_reference_paths.get(scene.index) or style_path\n'
         .. '                actual = regenerate_single_image(sk, prompt, provider, "' .. safeOutput .. '",\n'
-        .. '                    style_reference_path=style_path, defaults=defaults,\n'
+        .. '                    style_reference_path=effective_style_path, defaults=defaults,\n'
         .. '                    character_refs=char_refs)\n'
         .. '                if actual:\n'
         .. '                    paths[sk] = actual\n'
@@ -3197,7 +3295,7 @@ function win.On.RetryFailedImages.Clicked(ev)
         .. '                            prompt=prompt,\n'
         .. '                            provider=type(provider).__name__,\n'
         .. '                            provider_settings={"model": "' .. model .. '", "aspect_ratio": "' .. aspect .. '"},\n'
-        .. '                            style_reference_path=style_path or "",\n'
+        .. '                            style_reference_path=effective_style_path or "",\n'
         .. '                            character_refs=char_refs)\n'
         .. '                    except Exception: pass\n'
         .. '                else:\n'
@@ -3390,6 +3488,13 @@ function win.On.RegenImage.Clicked(ev)
     local safePath = itm.ScriptPath.Text:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeOutput = outputDir:gsub("\\", "\\\\"):gsub('"', '\\"')
     local safeStyle = (itm.StylePath.Text or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+    local sceneStyleParts = {}
+    for sceneIdx, path in pairs(sceneStyleImages or {}) do
+        if path and path ~= "" then
+            table.insert(sceneStyleParts, JSON.encode(tostring(sceneIdx)) .. ":" .. JSON.encode(path))
+        end
+    end
+    local sceneStyleRefsJson = "{" .. table.concat(sceneStyleParts, ",") .. "}"
     local safeServerUrl = (config.providers.comfyui.serverUrl or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
 
     -- Per-provider model kwarg routing (mirrors the standalone tool
@@ -3420,6 +3525,9 @@ function win.On.RegenImage.Clicked(ev)
         .. '    else:\n'
         .. '        screenplay = parse_fountain(script_path)\n'
         .. '    char_images = json.loads(' .. pyStringLiteral(charImgJson) .. ')\n'
+        .. '    scene_style_reference_paths = json.loads(' .. pyStringLiteral(sceneStyleRefsJson) .. ')\n'
+        .. '    if not isinstance(scene_style_reference_paths, dict):\n'
+        .. '        scene_style_reference_paths = {}\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
@@ -3447,9 +3555,10 @@ function win.On.RegenImage.Clicked(ev)
         .. '            char_refs[c] = ch.reference_image_path\n'
         .. '    final_prompt = provider.build_prompt(base_prompt, char_refs)\n'
         .. '    style_path = "' .. safeStyle .. '" if "' .. safeStyle .. '" else None\n'
+        .. '    effective_style_path = scene_style_reference_paths.get(str(found_scene.index)) or scene_style_reference_paths.get(found_scene.index) or style_path\n'
         .. '    actual = regenerate_single_image(\n'
         .. '        target, final_prompt, provider, "' .. safeOutput .. '",\n'
-        .. '        style_reference_path=style_path, defaults=defaults,\n'
+        .. '        style_reference_path=effective_style_path, defaults=defaults,\n'
         .. '        character_refs=char_refs,\n'
         .. extraModelKwargs
         .. '    )\n'
@@ -3464,7 +3573,7 @@ function win.On.RegenImage.Clicked(ev)
         .. '            prompt=final_prompt,\n'
         .. '            provider=type(provider).__name__,\n'
         .. '            provider_settings={"model": "' .. rrModel .. '"},\n'
-        .. '            style_reference_path=style_path or "",\n'
+        .. '            style_reference_path=effective_style_path or "",\n'
         .. '            character_refs=char_refs)\n'
         .. '    except Exception: pass\n'
         .. '    print(json.dumps({"status":"ok","shot_key":target,"file_path":actual}))\n'
@@ -5108,6 +5217,35 @@ end
 -- ============================================================
 -- POPULATE TREES WHEN ENTERING STEPS
 -- ============================================================
+
+populateSceneStyleTree = function()
+    if not itm.SceneStyleTree then return end
+
+    local hdr = itm.SceneStyleTree:NewItem()
+    hdr.Text[0] = "Scene"
+    hdr.Text[1] = "Heading"
+    hdr.Text[2] = "Set / Style Reference"
+    itm.SceneStyleTree:SetHeaderItem(hdr)
+    itm.SceneStyleTree.ColumnCount = 3
+    itm.SceneStyleTree.ColumnWidth[0] = 60
+    itm.SceneStyleTree.ColumnWidth[1] = 260
+    itm.SceneStyleTree.ColumnWidth[2] = 300
+    itm.SceneStyleTree:Clear()
+
+    if screenplayData and screenplayData.scenes then
+        for _, scene in ipairs(screenplayData.scenes) do
+            local item = itm.SceneStyleTree:NewItem()
+            local idx = tostring(scene.index)
+            item.Text[0] = idx
+            local heading = scene.heading or ((scene.location_type or "") .. " " .. (scene.location or ""))
+            if #heading > 70 then heading = heading:sub(1, 67) .. "..." end
+            item.Text[1] = heading
+            item.Text[2] = sceneStyleImages[idx] or "(uses global style image)"
+            itm.SceneStyleTree:AddTopLevelItem(item)
+        end
+    end
+    refreshSceneStyleStatus()
+end
 
 populateImageTree = function()
     if not screenplayData or not screenplayData.scenes then return end

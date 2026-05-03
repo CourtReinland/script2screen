@@ -220,7 +220,7 @@ The main wizard guides users through the full pipeline:
 | 1 | Welcome | Provider configuration (API keys, server URLs, Test buttons) per category — image / video / voice / lip-sync |
 | 2 | Script | Load .fountain or .pdf, pick parser (heuristic / Claude / GPT-4o / Grok), enter the LLM key if applicable, click Parse |
 | 3 | Characters | Assign reference images or editable AI-generated text prompts to characters; auto-loads reference images from a per-character library across projects |
-| 4 | Style | Style reference image, aspect ratio, creative-detail slider, "Refine prompts with LLM" toggle, per-provider model dropdowns (Mystic style / Freepik API / OpenAI model+quality+size+format+background / Gemini model) — all conditionally hidden based on the Step-1 image provider |
+| 4 | Style | Global style fallback plus optional per-scene set/style reference images, aspect ratio, creative-detail slider, "Refine prompts with LLM" toggle, per-provider model dropdowns (Mystic style / Freepik API / OpenAI model+quality+size+format+background / Gemini model) — all conditionally hidden based on the Step-1 image provider |
 | 5 | Review Image Prompts | Per-shot editable prompt tree; user can approve all, edit individually, or skip |
 | 6 | Image Generation | Generate All Images / Regenerate Selected / Retry Failed, with per-shot Re-roll Provider+Model dropdowns |
 | 7 | Review Video Prompts | Same as Step 5 but for motion prompts |
@@ -552,7 +552,7 @@ def find_or_create(parent, name):
 ### Python Pipeline
 | Module | Key Function | Purpose |
 |--------|-------------|---------|
-| `image_gen.py` | `generate_images_for_screenplay()` | Generate all shot images; concatenates prompt-mode character descriptions into shot prompts |
+| `image_gen.py` | `generate_images_for_screenplay()` | Generate all shot images; concatenates prompt-mode character descriptions into shot prompts and uses per-scene style/set reference images when provided |
 | `image_gen.py` | `build_image_prompt(shot, scene)` | Construct detailed image prompt |
 | `character_prompts.py` | `generate_character_prompts()` | Generate editable character visual prompts via xAI/Grok when configured, with deterministic fallback |
 | `video_gen.py` | `generate_videos_for_screenplay()` | Generate all shot videos |
