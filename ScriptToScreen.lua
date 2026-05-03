@@ -2819,14 +2819,17 @@ function win.On.GenAllImages.Clicked(ev)
     end
     local charImgJson = "{" .. table.concat(charImgParts, ",") .. "}"
 
-    -- Build character text prompts JSON (only for prompt-mode characters)
-    local charPromptPayload = {}
-    for name, prompt in pairs(characterPrompts) do
-        if characterModes[name] ~= "image" and prompt and prompt ~= "" then
-            charPromptPayload[name] = prompt
+    -- Build character text prompts JSON (only for prompt-mode characters).
+    -- Do not use JSON.encode({}) here: this project's lightweight encoder
+    -- serializes an empty Lua table as [] because Lua has no native
+    -- object/array distinction. Python expects a dict and calls .items().
+    local charPromptParts = {}
+    for name, prompt in pairs(characterPrompts or {}) do
+        if characterModes[name] == "prompt" and prompt and prompt ~= "" then
+            table.insert(charPromptParts, JSON.encode(tostring(name)) .. ":" .. JSON.encode(prompt))
         end
     end
-    local charPromptJson = JSON.encode(charPromptPayload)
+    local charPromptJson = "{" .. table.concat(charPromptParts, ",") .. "}"
 
     -- Derive project slug for manifest recording
     local projectSlugCode = 'import re\n'
@@ -2853,6 +2856,10 @@ function win.On.GenAllImages.Clicked(ev)
         .. '        screenplay = parse_fountain(script_path)\n'
         .. '    char_images = json.loads(' .. pyStringLiteral(charImgJson) .. ')\n'
         .. '    character_text_prompts = json.loads(' .. pyStringLiteral(charPromptJson) .. ')\n'
+        .. '    if not isinstance(char_images, dict):\n'
+        .. '        char_images = {}\n'
+        .. '    if not isinstance(character_text_prompts, dict):\n'
+        .. '        character_text_prompts = {}\n'
         .. '    for name, path in char_images.items():\n'
         .. '        if name in screenplay.characters:\n'
         .. '            screenplay.characters[name].reference_image_path = path\n'
